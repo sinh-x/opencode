@@ -1,0 +1,88 @@
+repository: sinh-x/opencode
+upstream_repository: anomalyco/opencode
+
+branches:
+  dev:
+    role: upstream-tracking
+    tracks: upstream/dev
+    accepts:
+      - upstream-sync
+    rejects:
+      - sinh-specific-work
+      - pa-feature-work
+      - merges-from-sinh-x-dev
+    protection:
+      require_pull_request: true
+      require_status_checks: true
+      allow_direct_pushes: false
+      notes:
+        - Direct personal pushes are prohibited.
+        - Updates should only mirror upstream/dev through the documented sync path.
+
+  sinh-x-dev:
+    role: personal-integration
+    base: dev
+    accepts:
+      - sinh-specific-work
+      - pa-managed-customizations
+      - upstream-sync-from-dev
+    rejects:
+      - upstream-pr-work
+    protection:
+      require_pull_request: true
+      require_status_checks: true
+      allow_admin_override: true
+      notes:
+        - This is the long-lived base for Sinh-specific OpenCode customizations.
+        - Personal feature branches merge here, never into dev.
+
+feature_branches:
+  sinh_specific:
+    pattern: feat/*
+    base: sinh-x-dev
+    target: sinh-x-dev
+    examples:
+      - feat/branch-strategy
+      - feat/side-panel-launch-vars
+  upstream_sync:
+    pattern: sync/upstream-*
+    base: dev
+    target: sinh-x-dev
+    notes:
+      - Use only when upstream changes need conflict resolution before reaching sinh-x-dev.
+
+flows:
+  upstream_sync:
+    - upstream/dev
+    - dev
+    - sinh-x-dev
+  personal_work:
+    - sinh-x-dev
+    - feat/*
+    - sinh-x-dev
+
+prohibited_flows:
+  - from: sinh-x-dev
+    to: dev
+    reason: dev must remain an upstream-tracking branch only.
+  - from: feat/*
+    to: dev
+    reason: Sinh-specific and PA feature work must target sinh-x-dev.
+  - from: sinh-x-dev
+    to: upstream/dev
+    reason: Personal customizations are not submitted upstream by default.
+
+agent_rules:
+  choose_base_branch:
+    personal_customization: sinh-x-dev
+    pa_managed_customization: sinh-x-dev
+    branch_strategy_docs: sinh-x-dev
+    upstream_mirror_update: dev
+  before_editing:
+    - Read AGENTS.md.
+    - Read .claude/skills/git-workflow/SKILL.md.
+    - Verify the current branch matches the expected feature branch.
+  never:
+    - Do not create personal feature work from dev.
+    - Do not merge sinh-x-dev into dev.
+    - Do not target dev for Sinh-specific OpenCode customizations.
