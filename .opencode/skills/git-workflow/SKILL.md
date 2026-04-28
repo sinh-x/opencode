@@ -46,6 +46,24 @@ Examples:
 - `feat/branch-strategy` from `sinh-x-dev` to `sinh-x-dev`
 - `feat/side-panel-launch-vars` from `sinh-x-dev` to `sinh-x-dev`
 
+## PR Title Format
+
+Use conventional commit format for PR titles:
+
+```text
+<type>(<scope>): <summary>
+```
+
+Allowed types are `feat`, `fix`, `docs`, `chore`, `refactor`, and `test`. Use the affected package or area as the scope when practical, such as `app`, `desktop`, `opencode`, or `branch-strategy`.
+
+Do not prefix the PR title with the ticket ID. Keep ticket IDs in the PR body, branch name, commit body, or linked PA ticket instead.
+
+Examples:
+
+- `docs(opencode): set up fork branch strategy`
+- `feat(opencode): add side panel launch variables`
+- `chore(branch-strategy): sync upstream into sinh-x-dev`
+
 ## Upstream Sync Flow
 
 Upstream updates flow one way:

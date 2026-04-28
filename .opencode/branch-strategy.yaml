@@ -54,6 +54,23 @@ feature_branches:
     notes:
       - Use only when upstream changes need conflict resolution before reaching sinh-x-dev.
 
+pull_requests:
+  title_format: conventional_commit
+  allowed_types:
+    - feat
+    - fix
+    - docs
+    - chore
+    - refactor
+    - test
+  scope_guidance:
+    - Use the affected package or area as scope when practical, for example app, desktop, opencode, or branch-strategy.
+    - Do not prefix titles with ticket IDs; keep ticket IDs in the PR body, branch name, commit body, or ticket links.
+  examples:
+    - docs(opencode): set up fork branch strategy
+    - feat(opencode): add side panel launch variables
+    - chore(branch-strategy): sync upstream into sinh-x-dev
+
 flows:
   upstream_sync:
     - upstream/dev
