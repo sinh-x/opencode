@@ -32,9 +32,12 @@ branches:
       require_pull_request: true
       require_status_checks: true
       allow_admin_override: true
+      required_checks:
+        - typecheck
       notes:
         - This is the long-lived base for Sinh-specific OpenCode customizations.
         - Personal feature branches merge here, never into dev.
+        - Keep the required gate lightweight; full unit/e2e workflows are optional or manual for high-risk changes.
 
 feature_branches:
   sinh_specific:

@@ -87,7 +87,8 @@ Protect `dev` with:
 Protect `sinh-x-dev` with:
 
 - Pull requests required for normal changes.
-- Required CI checks for tests and typecheck.
+- Required lightweight CI checks, with `typecheck` as the default required check.
+- Full unit/e2e workflows are optional or manual for high-risk changes; they are not required for every `sinh-x-dev` PR.
 - Sinh/admin override available for emergencies.
 
 ## Agent Checklist
