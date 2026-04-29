@@ -2,6 +2,7 @@
 - ALWAYS USE PARALLEL TOOLS WHEN APPLICABLE.
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
+- Before making git changes, read `.opencode/branch-strategy.yaml` and `.opencode/skills/git-workflow/SKILL.md`; Sinh-specific work must branch from and target `sinh-x-dev`, never `dev`. `.claude` files are compatibility pointers only.
 - Prefer automation: execute requested actions without confirmation unless blocked by missing info or safety/irreversibility.
 
 ## Style Guide

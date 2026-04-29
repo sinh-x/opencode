@@ -1,0 +1,3 @@
+canonical: .opencode/branch-strategy.yaml
+status: compatibility-pointer
+message: OpenCode repo branch strategy is canonical in .opencode/branch-strategy.yaml. Read that file for current rules.
