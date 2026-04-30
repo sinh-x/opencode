@@ -24,6 +24,7 @@ target
 .direnv/
 
 # Local dev files
+.claude/ai-sessions.md
 opencode-dev
 UPCOMING_CHANGELOG.md
 logs/
