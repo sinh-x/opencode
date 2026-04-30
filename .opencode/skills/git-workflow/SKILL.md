@@ -96,13 +96,15 @@ Recommended interactive sequence:
 
 ```bash
 sh script/upstream-status.sh
-# Ask Sinh before mutating git state.
+# Ask Sinh before checking out dev.
 git checkout dev
+# Ask Sinh before merging upstream/dev into dev.
 git merge --ff-only upstream/dev
 # Ask Sinh before publishing the updated upstream mirror.
 git push origin dev
-# Ask Sinh again before bringing personal integration forward.
+# Ask Sinh before checking out sinh-x-dev.
 git checkout sinh-x-dev
+# Ask Sinh before merging dev into sinh-x-dev.
 git merge dev
 # Ask Sinh before publishing the updated personal integration branch.
 git push origin sinh-x-dev
