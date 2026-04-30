@@ -3,6 +3,7 @@
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
 - Before making git changes, read `.opencode/branch-strategy.yaml` and `.opencode/skills/git-workflow/SKILL.md`; Sinh-specific work must branch from and target `sinh-x-dev`, never `dev`. `.claude` files are compatibility pointers only.
+- `script/upstream-status.sh` is report-only; branch sync actions require Sinh confirmation through `.opencode/skills/git-workflow/SKILL.md`.
 - Prefer automation: execute requested actions without confirmation unless blocked by missing info or safety/irreversibility.
 
 ## Style Guide
