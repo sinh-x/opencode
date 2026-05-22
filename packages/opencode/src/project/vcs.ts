@@ -254,6 +254,37 @@ export const ApplyResult = Schema.Struct({
 })
 export type ApplyResult = Schema.Schema.Type<typeof ApplyResult>
 
+export const BranchCommit = Schema.Struct({
+  hash: Schema.String,
+  subject: Schema.String,
+  author: Schema.String,
+}).annotate({ identifier: "VcsBranchCommit" })
+export type BranchCommit = Schema.Schema.Type<typeof BranchCommit>
+
+export const BranchDiffSummary = Schema.Struct({
+  total_files: Schema.Finite,
+  additions: Schema.Finite,
+  deletions: Schema.Finite,
+  rows: Schema.Array(
+    Schema.Struct({
+      file: Schema.String,
+      additions: Schema.Finite,
+      deletions: Schema.Finite,
+    }),
+  ),
+}).annotate({ identifier: "VcsBranchDiffSummary" })
+export type BranchDiffSummary = Schema.Schema.Type<typeof BranchDiffSummary>
+
+export const BranchSummary = Schema.Struct({
+  active_branch: Schema.optional(Schema.String),
+  selected_ref: Schema.optional(Schema.String),
+  available_refs: Schema.Array(Schema.String),
+  commit_total: Schema.Finite,
+  commit_rows: Schema.Array(BranchCommit),
+  diff: BranchDiffSummary,
+}).annotate({ identifier: "VcsBranchSummary" })
+export type BranchSummary = Schema.Schema.Type<typeof BranchSummary>
+
 export class PatchApplyError extends Schema.TaggedErrorClass<PatchApplyError>()("VcsPatchApplyError", {
   message: Schema.String,
   reason: Schema.Literals(["non-git", "not-clean"]),
@@ -265,6 +296,7 @@ export interface Interface {
   readonly defaultBranch: () => Effect.Effect<string | undefined>
   readonly status: () => Effect.Effect<FileStatus[]>
   readonly diff: (mode: Mode) => Effect.Effect<FileDiff[]>
+  readonly summary: (selectedRef: string | undefined) => Effect.Effect<BranchSummary>
   readonly diffRaw: () => Effect.Effect<string>
   readonly apply: (input: ApplyInput) => Effect.Effect<ApplyResult, PatchApplyError>
 }
@@ -365,6 +397,60 @@ export const layer: Layer.Layer<Service, never, Git.Service | Bus.Service> = Lay
         const ref = yield* git.mergeBase(ctx.directory, value.root.ref)
         if (!ref) return []
         return yield* diffAgainstRef(git, ctx.directory, ref)
+      }),
+      summary: Effect.fn("Vcs.summary")(function* (selectedRef: string | undefined) {
+        const value = yield* InstanceState.get(state)
+        const ctx = yield* InstanceState.context
+        if (ctx.project.vcs !== "git") {
+          return {
+            active_branch: undefined,
+            selected_ref: undefined,
+            available_refs: [],
+            commit_total: 0,
+            commit_rows: [],
+            diff: { total_files: 0, additions: 0, deletions: 0, rows: [] },
+          }
+        }
+
+        const refs = yield* git.refs(ctx.directory)
+        const defaultRef = value.root?.ref
+        const fallback = refs.includes("develop") ? "develop" : refs.includes("origin/develop") ? "origin/develop" : undefined
+        const resolved = selectedRef && refs.includes(selectedRef) ? selectedRef : refs.includes(defaultRef ?? "") ? defaultRef : fallback
+        if (!resolved || !value.current) {
+          return {
+            active_branch: value.current,
+            selected_ref: resolved,
+            available_refs: refs,
+            commit_total: 0,
+            commit_rows: [],
+            diff: { total_files: 0, additions: 0, deletions: 0, rows: [] },
+          }
+        }
+
+        const ref = yield* git.mergeBase(ctx.directory, resolved, value.current)
+        if (!ref) {
+          return {
+            active_branch: value.current,
+            selected_ref: resolved,
+            available_refs: refs,
+            commit_total: 0,
+            commit_rows: [],
+            diff: { total_files: 0, additions: 0, deletions: 0, rows: [] },
+          }
+        }
+
+        const [commits, diff] = yield* Effect.all(
+          [git.commitSummary(ctx.directory, ref, value.current, 10), git.diffSummary(ctx.directory, ref, 20)],
+          { concurrency: 2 },
+        )
+        return {
+          active_branch: value.current,
+          selected_ref: resolved,
+          available_refs: refs,
+          commit_total: commits.total,
+          commit_rows: commits.rows,
+          diff,
+        }
       }),
       diffRaw: Effect.fn("Vcs.diffRaw")(function* () {
         const ctx = yield* InstanceState.context

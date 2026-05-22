@@ -158,7 +158,7 @@ describe("instance HttpApi", () => {
       const path = yield* Path.Path
       yield* fs.writeFileString(path.join(dir, "changed.txt"), "hello")
 
-      const [paths, vcs, diff] = yield* Effect.all(
+      const [paths, vcs, diff, summary] = yield* Effect.all(
         [
           HttpClientRequest.get(InstancePaths.path).pipe(directoryHeader(dir), HttpClient.execute),
           HttpClientRequest.get(InstancePaths.vcs).pipe(directoryHeader(dir), HttpClient.execute),
@@ -167,6 +167,7 @@ describe("instance HttpApi", () => {
             directoryHeader(dir),
             HttpClient.execute,
           ),
+          HttpClientRequest.get(InstancePaths.vcsSummary).pipe(directoryHeader(dir), HttpClient.execute),
         ],
         { concurrency: "unbounded" },
       )
@@ -181,6 +182,19 @@ describe("instance HttpApi", () => {
       expect(yield* diff.json).toContainEqual(
         expect.objectContaining({ file: "changed.txt", additions: 1, status: "added" }),
       )
+
+      expect(summary.status).toBe(200)
+      expect(yield* summary.json).toMatchObject({
+        active_branch: expect.any(String),
+        available_refs: expect.any(Array),
+        commit_total: expect.any(Number),
+        diff: expect.objectContaining({
+          total_files: expect.any(Number),
+          additions: expect.any(Number),
+          deletions: expect.any(Number),
+          rows: expect.any(Array),
+        }),
+      })
     }),
   )
 })

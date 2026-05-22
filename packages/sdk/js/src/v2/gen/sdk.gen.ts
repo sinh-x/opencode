@@ -215,6 +215,7 @@ import type {
   VcsDiffResponses,
   VcsGetResponses,
   VcsStatusResponses,
+  VcsSummaryResponses,
   WorktreeCreateErrors,
   WorktreeCreateInput,
   WorktreeCreateResponses,
@@ -1727,6 +1728,38 @@ export class Vcs extends HeyApiClient {
     )
     return (options?.client ?? this.client).get<VcsDiffResponses, unknown, ThrowOnError>({
       url: "/vcs/diff",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get VCS branch summary
+   *
+   * Retrieve active branch summary, refs, commit metadata, and diff stats against a selected ref.
+   */
+  public summary<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      ref?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "ref" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<VcsSummaryResponses, unknown, ThrowOnError>({
+      url: "/vcs/summary",
       ...options,
       ...params,
     })

@@ -34,6 +34,12 @@ export type Base = {
   readonly ref: string
 }
 
+export type Commit = {
+  readonly hash: string
+  readonly subject: string
+  readonly author: string
+}
+
 export type Item = {
   readonly file: string
   readonly code: string
@@ -74,6 +80,7 @@ export interface Options {
 export interface Interface {
   readonly run: (args: string[], opts: Options) => Effect.Effect<Result>
   readonly branch: (cwd: string) => Effect.Effect<string | undefined>
+  readonly refs: (cwd: string) => Effect.Effect<string[]>
   readonly prefix: (cwd: string) => Effect.Effect<string>
   readonly defaultBranch: (cwd: string) => Effect.Effect<Base | undefined>
   readonly hasHead: (cwd: string) => Effect.Effect<boolean>
@@ -82,6 +89,16 @@ export interface Interface {
   readonly status: (cwd: string) => Effect.Effect<Item[]>
   readonly diff: (cwd: string, ref: string) => Effect.Effect<Item[]>
   readonly stats: (cwd: string, ref: string) => Effect.Effect<Stat[]>
+  readonly commitSummary: (cwd: string, base: string, head: string | undefined, limit: number) => Effect.Effect<{
+    total: number
+    rows: Commit[]
+  }>
+  readonly diffSummary: (cwd: string, ref: string, limit: number) => Effect.Effect<{
+    total_files: number
+    additions: number
+    deletions: number
+    rows: Stat[]
+  }>
   readonly patch: (cwd: string, ref: string, file: string, options?: PatchOptions) => Effect.Effect<Patch>
   readonly patchAll: (cwd: string, ref: string, options?: PatchOptions) => Effect.Effect<Patch>
   readonly patchUntracked: (cwd: string, file: string, options?: PatchOptions) => Effect.Effect<Patch>
@@ -141,8 +158,16 @@ export const layer = Layer.effect(
         .filter(Boolean)
     })
 
-    const refs = Effect.fnUntraced(function* (cwd: string) {
+    const localRefs = Effect.fnUntraced(function* (cwd: string) {
       return yield* lines(["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd })
+    })
+
+    const refs = Effect.fn("Git.refs")(function* (cwd: string) {
+      const local = yield* lines(["for-each-ref", "--format=%(refname:short)", "refs/heads"], { cwd })
+      const remote = yield* lines(["for-each-ref", "--format=%(refname:short)", "refs/remotes"], { cwd })
+      return [...new Set([...local, ...remote.filter((item) => !item.endsWith("/HEAD"))])].toSorted((a, b) =>
+        a.localeCompare(b),
+      )
     })
 
     const configured = Effect.fnUntraced(function* (cwd: string, list: string[]) {
@@ -184,7 +209,7 @@ export const layer = Layer.effect(
         }
       }
 
-      const list = yield* refs(cwd)
+      const list = yield* localRefs(cwd)
       const next = yield* configured(cwd, list)
       if (next) return next
       if (list.includes("main")) return { name: "main", ref: "main" } satisfies Base
@@ -259,6 +284,37 @@ export const layer = Layer.effect(
       })
     })
 
+    const commitSummary = Effect.fn("Git.commitSummary")(function* (
+      cwd: string,
+      base: string,
+      head: string | undefined,
+      limit: number,
+    ) {
+      const target = head ?? "HEAD"
+      const range = `${base}..${target}`
+      const count = yield* run(["rev-list", "--count", range], { cwd })
+      const total = Number.parseInt(out(count) || "0", 10)
+      if (!Number.isFinite(total) || total <= 0) return { total: 0, rows: [] }
+      const rows = (yield* lines(["log", `--max-count=${limit}`, "--format=%H%x09%s%x09%an", range], { cwd })).flatMap(
+        (line) => {
+          const [hash, subject, author] = line.split("\t")
+          if (!hash || !subject || !author) return []
+          return [{ hash, subject, author } satisfies Commit]
+        },
+      )
+      return { total, rows }
+    })
+
+    const diffSummary = Effect.fn("Git.diffSummary")(function* (cwd: string, ref: string, limit: number) {
+      const all = yield* stats(cwd, ref)
+      return {
+        total_files: all.length,
+        additions: all.reduce((sum, item) => sum + item.additions, 0),
+        deletions: all.reduce((sum, item) => sum + item.deletions, 0),
+        rows: all.slice(0, limit),
+      }
+    })
+
     const patch = Effect.fn("Git.patch")(function* (cwd: string, ref: string, file: string, options?: PatchOptions) {
       const result = yield* run(
         ["diff", "--patch", "--no-ext-diff", "--no-renames", `--unified=${options?.context ?? 3}`, ref, "--", file],
@@ -325,6 +381,7 @@ export const layer = Layer.effect(
     return Service.of({
       run,
       branch,
+      refs,
       prefix,
       defaultBranch,
       hasHead,
@@ -333,6 +390,8 @@ export const layer = Layer.effect(
       status,
       diff,
       stats,
+      commitSummary,
+      diffSummary,
       patch,
       patchAll,
       patchUntracked,

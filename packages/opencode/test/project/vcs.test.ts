@@ -300,6 +300,78 @@ describe("Vcs diff", () => {
   )
 
   it.instance(
+    "summary() defaults selected ref to detected default branch",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        yield* git(test.directory, ["branch", "develop"])
+        yield* git(test.directory, ["checkout", "-b", "feature/test"])
+        yield* write(path.join(test.directory, "summary.txt"), "hello\n")
+        yield* git(test.directory, ["add", "."])
+        yield* git(test.directory, ["commit", "--no-gpg-sign", "-m", "summary commit"])
+
+        const vcs = yield* init()
+        const summary = yield* vcs.summary(undefined)
+
+        expect(summary.active_branch).toBe("feature/test")
+        expect(summary.selected_ref).toBe("main")
+        expect(summary.commit_total).toBeGreaterThanOrEqual(1)
+        expect(summary.commit_rows.length).toBeGreaterThanOrEqual(1)
+        expect(summary.diff.total_files).toBeGreaterThanOrEqual(1)
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "summary() falls back to develop when detected default is unavailable",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        yield* git(test.directory, ["branch", "develop"])
+        yield* git(test.directory, ["checkout", "-b", "feature/test"])
+        yield* write(path.join(test.directory, "fallback.txt"), "hello\n")
+        yield* git(test.directory, ["add", "."])
+        yield* git(test.directory, ["commit", "--no-gpg-sign", "-m", "fallback commit"])
+        yield* git(test.directory, ["branch", "-D", "main"])
+
+        const vcs = yield* init()
+        const summary = yield* vcs.summary(undefined)
+
+        expect(summary.selected_ref).toBe("develop")
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "summary() limits commit rows and file rows",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        yield* git(test.directory, ["checkout", "-b", "feature/test"])
+        for (let i = 0; i < 12; i++) {
+          yield* write(path.join(test.directory, `commit-${i}.txt`), `line-${i}\n`)
+          yield* git(test.directory, ["add", "."])
+          yield* git(test.directory, ["commit", "--no-gpg-sign", "-m", `commit-${i}`])
+        }
+        for (let i = 0; i < 25; i++) {
+          yield* write(path.join(test.directory, `change-${i}.txt`), `change-${i}\n`)
+        }
+        yield* git(test.directory, ["add", "."])
+        yield* git(test.directory, ["commit", "--no-gpg-sign", "-m", "many files"])
+
+        const vcs = yield* init()
+        const summary = yield* vcs.summary("main")
+
+        expect(summary.commit_total).toBeGreaterThan(10)
+        expect(summary.commit_rows.length).toBe(10)
+        expect(summary.diff.total_files).toBeGreaterThan(20)
+        expect(summary.diff.rows.length).toBe(20)
+      }),
+    { git: true },
+    30_000,
+  )
+
+  it.instance(
     "diff('branch') returns changes against default branch",
     () =>
       Effect.gen(function* () {
