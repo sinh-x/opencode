@@ -87,7 +87,14 @@ function View(props: { api: TuiPluginApi }) {
           <text fg={theme().text}>
             <b>OPA Context</b>
           </text>
-          <For each={env()}>{(item) => <text fg={theme().textMuted}>{item.key}: {item.value}</text>}</For>
+          <For each={env()}>
+            {(item) => (
+              <text>
+                <span style={{ fg: theme().textMuted }}>{item.key}: </span>
+                <span style={{ fg: theme().info }}>{item.value}</span>
+              </text>
+            )}
+          </For>
         </box>
       </Show>
       <Show when={loading()}>
@@ -103,21 +110,56 @@ function View(props: { api: TuiPluginApi }) {
               <text fg={theme().text}>
                 <b>Git Context</b>
               </text>
-              <text fg={theme().textMuted}>Active: {activeBranch()}</text>
+              <text>
+                <span style={{ fg: theme().textMuted }}>Active: </span>
+                <span style={{ fg: theme().success }}>{activeBranch()}</span>
+              </text>
               <box flexDirection="row" gap={1}>
-                <text fg={theme().textMuted}>Reference: {effectiveRef()}</text>
+                <text>
+                  <span style={{ fg: theme().textMuted }}>Reference: </span>
+                  <span style={{ fg: theme().info }}>{effectiveRef()}</span>
+                </text>
                 <Show when={availableRefs().length > 0}>
-                  <text fg={theme().text} onMouseDown={openRefSelector}>[change]</text>
+                  <text fg={theme().warning} onMouseDown={openRefSelector}>[change]</text>
                 </Show>
               </box>
-              <text fg={theme().textMuted}>
-                Commits: {summary()!.commit_rows.length}/{summary()!.commit_total}
+              <text>
+                <span style={{ fg: theme().textMuted }}>Commits: </span>
+                <span style={{ fg: theme().text }}>{summary()!.commit_rows.length}</span>
+                <span style={{ fg: theme().textMuted }}>/</span>
+                <span style={{ fg: theme().info }}>{summary()!.commit_total}</span>
               </text>
-              <For each={summary()!.commit_rows}>{(item) => <text fg={theme().textMuted}>{item.hash.slice(0, 7)} {item.subject}</text>}</For>
-              <text fg={theme().textMuted}>
-                Diff: +{summary()!.diff.additions} -{summary()!.diff.deletions} ({summary()!.diff.rows.length}/{summary()!.diff.total_files} files)
+              <For each={summary()!.commit_rows}>
+                {(item) => (
+                  <text>
+                    <span style={{ fg: theme().warning }}>{item.hash.slice(0, 7)}</span>
+                    <span style={{ fg: theme().textMuted }}> </span>
+                    <span style={{ fg: theme().textMuted }}>{item.subject}</span>
+                  </text>
+                )}
+              </For>
+              <text>
+                <span style={{ fg: theme().textMuted }}>Diff: </span>
+                <span style={{ fg: theme().diffAdded }}>+{summary()!.diff.additions}</span>
+                <span style={{ fg: theme().textMuted }}> </span>
+                <span style={{ fg: theme().diffRemoved }}>-{summary()!.diff.deletions}</span>
+                <span style={{ fg: theme().textMuted }}> (</span>
+                <span style={{ fg: theme().text }}>{summary()!.diff.rows.length}</span>
+                <span style={{ fg: theme().textMuted }}>/</span>
+                <span style={{ fg: theme().info }}>{summary()!.diff.total_files}</span>
+                <span style={{ fg: theme().textMuted }}> files)</span>
               </text>
-              <For each={summary()!.diff.rows}>{(item) => <text fg={theme().textMuted}>{item.file} +{item.additions} -{item.deletions}</text>}</For>
+              <For each={summary()!.diff.rows}>
+                {(item) => (
+                  <text>
+                    <span style={{ fg: theme().textMuted }}>{item.file}</span>
+                    <span style={{ fg: theme().textMuted }}> </span>
+                    <span style={{ fg: theme().diffAdded }}>+{item.additions}</span>
+                    <span style={{ fg: theme().textMuted }}> </span>
+                    <span style={{ fg: theme().diffRemoved }}>-{item.deletions}</span>
+                  </text>
+                )}
+              </For>
             </box>
           </Match>
         </Switch>
