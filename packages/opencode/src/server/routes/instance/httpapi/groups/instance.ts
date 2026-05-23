@@ -28,6 +28,11 @@ export const VcsDiffQuery = Schema.Struct({
   mode: Vcs.Mode,
 })
 
+export const VcsSummaryQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  ref: Schema.optional(Schema.String),
+})
+
 export class ApiVcsApplyError extends Schema.ErrorClass<ApiVcsApplyError>("VcsApplyError")(
   {
     name: Schema.Literal("VcsApplyError"),
@@ -45,6 +50,7 @@ export const InstancePaths = {
   vcs: "/vcs",
   vcsStatus: "/vcs/status",
   vcsDiff: "/vcs/diff",
+  vcsSummary: "/vcs/summary",
   vcsDiffRaw: "/vcs/diff/raw",
   vcsApply: "/vcs/apply",
   command: "/command",
@@ -108,6 +114,16 @@ export const InstanceApi = HttpApi.make("instance")
             identifier: "vcs.diff",
             summary: "Get VCS diff",
             description: "Retrieve the current git diff for the working tree or against the default branch.",
+          }),
+        ),
+        HttpApiEndpoint.get("vcsSummary", InstancePaths.vcsSummary, {
+          query: VcsSummaryQuery,
+          success: described(Vcs.BranchSummary, "VCS branch summary"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "vcs.summary",
+            summary: "Get VCS branch summary",
+            description: "Retrieve active branch summary, refs, commit metadata, and diff stats against a selected ref.",
           }),
         ),
         HttpApiEndpoint.get("vcsDiffRaw", InstancePaths.vcsDiffRaw, {

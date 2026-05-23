@@ -1586,6 +1586,32 @@ export type VcsFileDiff = {
   status?: "added" | "deleted" | "modified"
 }
 
+export type VcsBranchCommit = {
+  hash: string
+  subject: string
+  author: string
+}
+
+export type VcsBranchDiffSummary = {
+  total_files: number
+  additions: number
+  deletions: number
+  rows: Array<{
+    file: string
+    additions: number
+    deletions: number
+  }>
+}
+
+export type VcsBranchSummary = {
+  active_branch?: string
+  selected_ref?: string
+  available_refs: Array<string>
+  commit_total: number
+  commit_rows: Array<VcsBranchCommit>
+  diff: VcsBranchDiffSummary
+}
+
 export type VcsApplyError = {
   name: "VcsApplyError"
   data: {
@@ -4525,6 +4551,26 @@ export type VcsDiffResponses = {
 }
 
 export type VcsDiffResponse = VcsDiffResponses[keyof VcsDiffResponses]
+
+export type VcsSummaryData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+    ref?: string
+  }
+  url: "/vcs/summary"
+}
+
+export type VcsSummaryResponses = {
+  /**
+   * VCS branch summary
+   */
+  200: VcsBranchSummary
+}
+
+export type VcsSummaryResponse = VcsSummaryResponses[keyof VcsSummaryResponses]
 
 export type VcsDiffRawData = {
   body?: never
