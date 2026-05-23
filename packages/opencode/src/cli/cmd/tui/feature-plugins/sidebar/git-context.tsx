@@ -1,6 +1,6 @@
 import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { InternalTuiPlugin } from "../../plugin/internal"
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 
 const id = "internal:sidebar-git-context"
 const kvRefGlobalKey = "sidebar_git_selected_ref"
@@ -41,10 +41,20 @@ export function sidebarStoredSelectedRef(repoValue: string | null, legacyValue: 
   return legacyValue ?? undefined
 }
 
+export function sidebarRefreshKey(input: {
+  selectedRef: string | undefined
+  selectedRefKey: string
+  branch: string | undefined
+  pollTick: number
+}) {
+  return [input.selectedRefKey, input.selectedRef, input.branch, String(input.pollTick)].join("\n")
+}
+
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [loading, setLoading] = createSignal(true)
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
+  const [pollTick, setPollTick] = createSignal(0)
   const env = createMemo(() => sidebarLaunchEnv())
   const selectedRefKey = createMemo(() =>
     sidebarSelectedRefKey(props.api.state.path.worktree, props.api.state.path.directory),
@@ -57,6 +67,19 @@ function View(props: { api: TuiPluginApi }) {
   )
 
   createEffect(() => {
+    const timer = setInterval(() => {
+      setPollTick((value) => value + 1)
+    }, 10_000)
+    onCleanup(() => clearInterval(timer))
+  })
+
+  createEffect(() => {
+    sidebarRefreshKey({
+      selectedRef: selectedRef(),
+      selectedRefKey: selectedRefKey(),
+      branch: props.api.state.vcs?.branch,
+      pollTick: pollTick(),
+    })
     const current = selectedRef()
     setLoading(true)
     void props.api.client.vcs

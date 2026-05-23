@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   sidebarLaunchEnv,
+  sidebarRefreshKey,
   sidebarSelectedRef,
   sidebarSelectedRefKey,
   sidebarStoredSelectedRef,
@@ -84,5 +85,32 @@ describe("sidebarStoredSelectedRef", () => {
 
   test("returns undefined when both values are missing", () => {
     expect(sidebarStoredSelectedRef(null, null)).toBeUndefined()
+  })
+})
+
+describe("sidebarRefreshKey", () => {
+  test("changes when selected ref changes", () => {
+    const branch = "feat/current"
+    const selectedRefKey = "sidebar_git_selected_ref:/repo"
+    const before = sidebarRefreshKey({ selectedRef: "origin/dev", selectedRefKey, branch, pollTick: 0 })
+    const after = sidebarRefreshKey({ selectedRef: "origin/main", selectedRefKey, branch, pollTick: 0 })
+    expect(before).not.toBe(after)
+  })
+
+  test("changes when branch changes", () => {
+    const selectedRef = "origin/dev"
+    const selectedRefKey = "sidebar_git_selected_ref:/repo"
+    const before = sidebarRefreshKey({ selectedRef, selectedRefKey, branch: "feat/one", pollTick: 0 })
+    const after = sidebarRefreshKey({ selectedRef, selectedRefKey, branch: "feat/two", pollTick: 0 })
+    expect(before).not.toBe(after)
+  })
+
+  test("changes when poll tick changes", () => {
+    const selectedRef = "origin/dev"
+    const selectedRefKey = "sidebar_git_selected_ref:/repo"
+    const branch = "feat/current"
+    const before = sidebarRefreshKey({ selectedRef, selectedRefKey, branch, pollTick: 1 })
+    const after = sidebarRefreshKey({ selectedRef, selectedRefKey, branch, pollTick: 2 })
+    expect(before).not.toBe(after)
   })
 })
