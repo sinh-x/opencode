@@ -3,7 +3,7 @@ import type { InternalTuiPlugin } from "../../plugin/internal"
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
 
 const id = "internal:sidebar-git-context"
-const kvRefKey = "sidebar_git_selected_ref"
+const kvRefGlobalKey = "sidebar_git_selected_ref"
 const envKeys = ["PA_DEPLOYMENT_ID", "PA_MODE", "PA_TEAM", "PA_TICKET_ID", "PA_PROVIDER", "PA_MODEL"] as const
 const secretPattern = /(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)/i
 
@@ -31,12 +31,30 @@ export function sidebarSelectedRef(summary: VcsBranchSummary | undefined, stored
   return summary.selected_ref
 }
 
+export function sidebarSelectedRefKey(worktree: string | undefined, directory: string | undefined, cwd: string = process.cwd()) {
+  const scope = worktree || directory || cwd
+  return `${kvRefGlobalKey}:${scope}`
+}
+
+export function sidebarStoredSelectedRef(repoValue: string | null, legacyValue: string | null) {
+  if (repoValue) return repoValue
+  return legacyValue ?? undefined
+}
+
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [loading, setLoading] = createSignal(true)
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
   const env = createMemo(() => sidebarLaunchEnv())
-  const selectedRef = createMemo(() => props.api.kv.get<string | undefined>(kvRefKey, undefined))
+  const selectedRefKey = createMemo(() =>
+    sidebarSelectedRefKey(props.api.state.path.worktree, props.api.state.path.directory),
+  )
+  const selectedRef = createMemo(() =>
+    sidebarStoredSelectedRef(
+      props.api.kv.get<string | null>(selectedRefKey(), null),
+      props.api.kv.get<string | null>(kvRefGlobalKey, null),
+    ),
+  )
 
   createEffect(() => {
     const current = selectedRef()
@@ -73,7 +91,7 @@ function View(props: { api: TuiPluginApi }) {
         current={effectiveRef()}
         options={options}
         onSelect={(item) => {
-          props.api.kv.set(kvRefKey, item.value)
+          props.api.kv.set(selectedRefKey(), item.value)
           props.api.ui.dialog.clear()
         }}
       />
