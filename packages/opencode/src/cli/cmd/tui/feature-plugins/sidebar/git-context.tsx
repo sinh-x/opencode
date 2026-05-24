@@ -4,6 +4,7 @@ import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Sw
 
 const id = "internal:sidebar-git-context"
 const kvRefGlobalKey = "sidebar_git_selected_ref"
+const refreshPollMs = 10_000
 const envKeys = ["PA_DEPLOYMENT_ID", "PA_MODE", "PA_TEAM", "PA_TICKET_ID", "PA_PROVIDER", "PA_MODEL"] as const
 const secretPattern = /(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)/i
 
@@ -62,6 +63,7 @@ function View(props: { api: TuiPluginApi }) {
   const selectedRef = createMemo(() =>
     sidebarStoredSelectedRef(
       props.api.kv.get<string | null>(selectedRefKey(), null),
+      // Keep legacy global key fallback for users upgrading from pre-repo-scoped storage.
       props.api.kv.get<string | null>(kvRefGlobalKey, null),
     ),
   )
@@ -69,11 +71,12 @@ function View(props: { api: TuiPluginApi }) {
   createEffect(() => {
     const timer = setInterval(() => {
       setPollTick((value) => value + 1)
-    }, 10_000)
+    }, refreshPollMs)
     onCleanup(() => clearInterval(timer))
   })
 
   createEffect(() => {
+    // Call-only dependency tracking so branch/ref/poll updates retrigger the summary refresh.
     sidebarRefreshKey({
       selectedRef: selectedRef(),
       selectedRefKey: selectedRefKey(),
@@ -87,9 +90,7 @@ function View(props: { api: TuiPluginApi }) {
       .then((result) => {
         setSummary(result.data)
       })
-      .catch(() => {
-        setSummary(undefined)
-      })
+      .catch(() => undefined)
       .finally(() => {
         setLoading(false)
       })
@@ -138,10 +139,10 @@ function View(props: { api: TuiPluginApi }) {
           </For>
         </box>
       </Show>
-      <Show when={loading()}>
+      <Show when={loading() && !summary()}>
         <text fg={theme().textMuted}>Loading git context...</text>
       </Show>
-      <Show when={!loading() && summary()}>
+      <Show when={summary()}>
         <Switch>
           <Match when={!activeBranch() || !effectiveRef()}>
             <text fg={theme().textMuted}>Git context unavailable</text>

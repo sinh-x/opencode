@@ -61,6 +61,10 @@ describe("sidebarSelectedRef", () => {
 })
 
 describe("sidebarSelectedRefKey", () => {
+  test("prefers worktree when worktree and directory differ", () => {
+    expect(sidebarSelectedRefKey("/repo/worktree", "/repo/directory")).toBe("sidebar_git_selected_ref:/repo/worktree")
+  })
+
   test("uses worktree when available", () => {
     expect(sidebarSelectedRefKey("/repo-a", "/repo-a")).toBe("sidebar_git_selected_ref:/repo-a")
   })
