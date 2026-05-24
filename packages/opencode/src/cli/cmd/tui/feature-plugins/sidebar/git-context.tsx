@@ -51,10 +51,28 @@ export function sidebarRefreshKey(input: {
   return [input.selectedRefKey, input.selectedRef, input.branch, String(input.pollTick)].join("\n")
 }
 
+export function sidebarRefreshState(
+  previousSummary: VcsBranchSummary | undefined,
+  nextSummary: VcsBranchSummary | undefined,
+  failed: boolean,
+) {
+  if (failed) {
+    return {
+      summary: previousSummary,
+      stale: Boolean(previousSummary),
+    }
+  }
+  return {
+    summary: nextSummary,
+    stale: false,
+  }
+}
+
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [loading, setLoading] = createSignal(true)
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
+  const [stale, setStale] = createSignal(false)
   const [pollTick, setPollTick] = createSignal(0)
   const env = createMemo(() => sidebarLaunchEnv())
   const selectedRefKey = createMemo(() =>
@@ -88,9 +106,15 @@ function View(props: { api: TuiPluginApi }) {
     void props.api.client.vcs
       .summary({ ref: current })
       .then((result) => {
-        setSummary(result.data)
+        const next = sidebarRefreshState(summary(), result.data, false)
+        setSummary(next.summary)
+        setStale(next.stale)
       })
-      .catch(() => undefined)
+      .catch(() => {
+        const next = sidebarRefreshState(summary(), undefined, true)
+        setSummary(next.summary)
+        setStale(next.stale)
+      })
       .finally(() => {
         setLoading(false)
       })
@@ -152,6 +176,9 @@ function View(props: { api: TuiPluginApi }) {
               <text fg={theme().text}>
                 <b>Git Context</b>
               </text>
+              <Show when={stale()}>
+                <text fg={theme().warning}>[stale]</text>
+              </Show>
               <text>
                 <span style={{ fg: theme().textMuted }}>Active: </span>
                 <span style={{ fg: theme().success }}>{activeBranch()}</span>

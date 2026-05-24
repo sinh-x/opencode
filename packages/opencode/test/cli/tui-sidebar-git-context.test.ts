@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   sidebarLaunchEnv,
   sidebarRefreshKey,
+  sidebarRefreshState,
   sidebarSelectedRef,
   sidebarSelectedRefKey,
   sidebarStoredSelectedRef,
@@ -116,5 +117,43 @@ describe("sidebarRefreshKey", () => {
     const before = sidebarRefreshKey({ selectedRef, selectedRefKey, branch, pollTick: 1 })
     const after = sidebarRefreshKey({ selectedRef, selectedRefKey, branch, pollTick: 2 })
     expect(before).not.toBe(after)
+  })
+})
+
+describe("sidebarRefreshState", () => {
+  test("keeps previous summary and marks stale when refresh fails", () => {
+    const previous = {
+      active_branch: "feat/current",
+      selected_ref: "origin/dev",
+      available_refs: ["origin/dev"],
+      commit_total: 3,
+      commit_rows: [{ hash: "abc1234", subject: "before", author: "sinh" }],
+      diff: { total_files: 1, additions: 2, deletions: 1, rows: [{ file: "a.ts", additions: 2, deletions: 1 }] },
+    }
+    const result = sidebarRefreshState(previous, undefined, true)
+    expect(result.summary).toEqual(previous)
+    expect(result.stale).toBeTrue()
+  })
+
+  test("uses next summary and clears stale when refresh succeeds", () => {
+    const previous = {
+      active_branch: "feat/current",
+      selected_ref: "origin/dev",
+      available_refs: ["origin/dev"],
+      commit_total: 3,
+      commit_rows: [{ hash: "abc1234", subject: "before", author: "sinh" }],
+      diff: { total_files: 1, additions: 2, deletions: 1, rows: [{ file: "a.ts", additions: 2, deletions: 1 }] },
+    }
+    const next = {
+      active_branch: "feat/current",
+      selected_ref: "origin/dev",
+      available_refs: ["origin/dev"],
+      commit_total: 4,
+      commit_rows: [{ hash: "def5678", subject: "after", author: "sinh" }],
+      diff: { total_files: 2, additions: 5, deletions: 2, rows: [{ file: "b.ts", additions: 5, deletions: 2 }] },
+    }
+    const result = sidebarRefreshState(previous, next, false)
+    expect(result.summary).toEqual(next)
+    expect(result.stale).toBeFalse()
   })
 })
