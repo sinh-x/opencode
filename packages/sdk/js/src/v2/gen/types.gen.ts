@@ -6386,6 +6386,15 @@ export type VcsSummaryData = {
   url: "/vcs/summary"
 }
 
+export type VcsSummaryErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type VcsSummaryError = VcsSummaryErrors[keyof VcsSummaryErrors]
+
 export type VcsSummaryResponses = {
   /**
    * VCS branch summary

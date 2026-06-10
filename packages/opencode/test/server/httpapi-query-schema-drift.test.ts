@@ -24,6 +24,7 @@ import {
   SessionPaths,
 } from "../../src/server/routes/instance/httpapi/groups/session"
 import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
+import { SessionsQuery } from "@opencode-ai/server/groups/session"
 import { SessionMessagesQuery } from "@opencode-ai/server/groups/message"
 import { QueryBoolean, QueryBooleanOpenApi } from "../../src/server/routes/instance/httpapi/groups/query"
 import { resetDatabase } from "../fixture/db"
@@ -55,7 +56,7 @@ const openApiDriftRoutes = [
   { method: "get", path: ExperimentalPaths.tool, query: ToolListQuery },
   { method: "get", path: InstancePaths.vcsDiff, query: VcsDiffQuery },
   { method: "get", path: InstancePaths.vcsSummary, query: VcsSummaryQuery },
-  { method: "get", path: "/api/session", query: V2SessionsQuery },
+  { method: "get", path: "/api/session", query: SessionsQuery },
   { method: "get", path: "/api/session/:sessionID/message", query: SessionMessagesQuery },
 ] satisfies Array<{ method: Method; path: string; query: QuerySchema }>
 

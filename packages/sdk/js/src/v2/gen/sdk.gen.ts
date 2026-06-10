@@ -320,6 +320,7 @@ import type {
   VcsGetResponses,
   VcsStatusErrors,
   VcsStatusResponses,
+  VcsSummaryErrors,
   VcsSummaryResponses,
   WorktreeCreateErrors,
   WorktreeCreateInput,
@@ -2106,7 +2107,7 @@ export class Vcs extends HeyApiClient {
         },
       ],
     )
-    return (options?.client ?? this.client).get<VcsSummaryResponses, unknown, ThrowOnError>({
+    return (options?.client ?? this.client).get<VcsSummaryResponses, VcsSummaryErrors, ThrowOnError>({
       url: "/vcs/summary",
       ...options,
       ...params,
