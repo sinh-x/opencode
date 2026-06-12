@@ -27,6 +27,8 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     writableTmpDirAsHomeHook
   ];
 
+  buildInputs = [ node_modules ];
+
   configurePhase = ''
     runHook preConfigure
 
@@ -46,7 +48,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook preBuild
 
     cd ./packages/opencode
-    bun --bun ./script/build.ts --single --skip-install
+    bun --bun ./script/nix-build.ts
     bun --bun ./script/schema.ts schema.json
 
     runHook postBuild
@@ -55,16 +57,18 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   installPhase = ''
     runHook preInstall
 
-    install -Dm755 dist/opencode-*/bin/opencode $out/bin/opencode
+    mkdir -p $out/lib/opencode
+    cp -R dist/opencode-*/bin/* $out/lib/opencode/
+    ln -s ${finalAttrs.node_modules}/node_modules $out/lib/opencode/node_modules
     install -Dm644 schema.json $out/share/opencode/schema.json
 
-    wrapProgram $out/bin/opencode \
+    makeBinaryWrapper ${lib.getExe bun} $out/bin/opencode \
+      --add-flags "$out/lib/opencode/index.js" \
       --prefix PATH : ${
         lib.makeBinPath (
           [
             ripgrep
           ]
-          # bun runs sysctl to detect if running on rosetta2
           ++ lib.optional stdenvNoCC.hostPlatform.isDarwin sysctl
         )
       }
