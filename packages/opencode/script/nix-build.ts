@@ -68,9 +68,7 @@ await Bun.build({
   format: "esm",
   minify: true,
   sourcemap: "none",
-  splitting: true,
-  files: { "opencode-web-ui.gen.ts": embeddedFileMap },
-  entrypoints: ["./src/index.ts", parserWorker, workerPath, "opencode-web-ui.gen.ts"],
+  entrypoints: ["./src/index.ts"],
   outdir: `dist/${name}/bin`,
   define: {
     OPENCODE_VERSION: `'${Script.version}'`,
