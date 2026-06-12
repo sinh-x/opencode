@@ -4,6 +4,7 @@ import HomeTips from "./home/tips"
 import SessionSwitcher from "./session"
 import SidebarContext from "./sidebar/context"
 import SidebarFiles from "./sidebar/files"
+import SidebarGitContext from "./sidebar/git-context"
 import SidebarFooter from "./sidebar/footer"
 import SidebarLsp from "./sidebar/lsp"
 import SidebarMcp from "./sidebar/mcp"
@@ -28,6 +29,7 @@ export function createBuiltinPlugins(options: {
     HomeFooter,
     HomeTips,
     SidebarContext,
+    SidebarGitContext,
     SidebarMcp,
     SidebarLsp,
     SidebarTodo,
