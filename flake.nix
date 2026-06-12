@@ -3,10 +3,11 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    bun.url = "github:oven-sh/bun/bun-v1.3.14";
   };
 
   outputs =
-    { self, nixpkgs, ... }:
+    { self, nixpkgs, bun, ... }:
     let
       systems = [
         "aarch64-linux"
@@ -16,16 +17,17 @@
       ];
       forEachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       rev = self.shortRev or self.dirtyShortRev or "dirty";
+      bunVersion = "1.3.14";
     in
     {
       devShells = forEachSystem (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [
-            bun
-            nodejs
-            pkg-config
-            openssl
-            git
+          packages = [
+            (pkgs.callPackage ./nix/bun-bin.nix { version = bunVersion; })
+            pkgs.nodejs
+            pkgs.pkg-config
+            pkgs.openssl
+            pkgs.git
           ];
         };
       });
