@@ -16,7 +16,6 @@
         "x86_64-darwin"
       ];
       forEachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
-      rev = self.shortRev or self.dirtyShortRev or "dirty";
       bunVersion = "1.3.14";
     in
     {
@@ -35,22 +34,16 @@
       overlays = {
         default =
           final: _prev: {
-            opencode = final.callPackage ./nix/opencode.nix {
-              bun = final.callPackage ./nix/bun-bin.nix { version = bunVersion; };
-              node_modules = final.callPackage ./nix/node_modules.nix {
-                bun = final.callPackage ./nix/bun-bin.nix { version = bunVersion; };
-              };
+            opencode = final.callPackage ./nix/opencode-bin.nix {
+              opencodeConfig = self + "/.opencode";
             };
           };
       };
 
       packages = forEachSystem (
         pkgs: rec {
-          default = pkgs.callPackage ./nix/opencode.nix {
-            bun = pkgs.callPackage ./nix/bun-bin.nix { version = bunVersion; };
-            node_modules = pkgs.callPackage ./nix/node_modules.nix {
-              bun = pkgs.callPackage ./nix/bun-bin.nix { version = bunVersion; };
-            };
+          default = pkgs.callPackage ./nix/opencode-bin.nix {
+            opencodeConfig = self + "/.opencode";
           };
           opencode = default;
         }
