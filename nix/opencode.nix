@@ -59,11 +59,13 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
     mkdir -p $out/lib/opencode
     cp -R dist/opencode-*/bin/* $out/lib/opencode/
-    # Symlink only the packages needed at runtime (externalized from bundle)
-    mkdir -p $out/lib/opencode/node_modules/@opentui
+    # Copy @opentui/core-linux-x64 directly (not symlink) — bun segfaults
+    # when loading the native .so through a cross-store symlink boundary
     platformSrc=$(find ${finalAttrs.node_modules}/node_modules/.bun -path "*/node_modules/@opentui/core-linux-x64" -type d 2>/dev/null | head -1)
     if [ -n "$platformSrc" ]; then
-      ln -s "$platformSrc" $out/lib/opencode/node_modules/@opentui/core-linux-x64
+      mkdir -p $out/lib/opencode/node_modules/@opentui
+      cp -R "$platformSrc" $out/lib/opencode/node_modules/@opentui/core-linux-x64
+      chmod -R +w $out/lib/opencode/node_modules/@opentui/core-linux-x64
     fi
     install -Dm644 schema.json $out/share/opencode/schema.json
 
