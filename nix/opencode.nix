@@ -27,8 +27,6 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     writableTmpDirAsHomeHook
   ];
 
-  buildInputs = [ node_modules ];
-
   configurePhase = ''
     runHook preConfigure
 
@@ -48,7 +46,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook preBuild
 
     cd ./packages/opencode
-    bun --bun ./script/nix-build.ts
+    bun --bun ./script/build.ts --single --skip-install
     bun --bun ./script/schema.ts schema.json
 
     runHook postBuild
@@ -57,25 +55,16 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   installPhase = ''
     runHook preInstall
 
-    mkdir -p $out/lib/opencode
-    cp -R dist/opencode-*/bin/* $out/lib/opencode/
-    # Copy @opentui/core-linux-x64 directly (not symlink) — bun segfaults
-    # when loading the native .so through a cross-store symlink boundary
-    platformSrc=$(find ${finalAttrs.node_modules}/node_modules/.bun -path "*/node_modules/@opentui/core-linux-x64" -type d 2>/dev/null | head -1)
-    if [ -n "$platformSrc" ]; then
-      mkdir -p $out/lib/opencode/node_modules/@opentui
-      cp -R "$platformSrc" $out/lib/opencode/node_modules/@opentui/core-linux-x64
-      chmod -R +w $out/lib/opencode/node_modules/@opentui/core-linux-x64
-    fi
+    install -Dm755 dist/opencode-*/bin/opencode $out/bin/opencode
     install -Dm644 schema.json $out/share/opencode/schema.json
 
-    makeBinaryWrapper ${lib.getExe bun} $out/bin/opencode \
-      --add-flags "$out/lib/opencode/index.js" \
+    wrapProgram $out/bin/opencode \
       --prefix PATH : ${
         lib.makeBinPath (
           [
             ripgrep
           ]
+          # bun runs sysctl to detect if running on rosetta2
           ++ lib.optional stdenvNoCC.hostPlatform.isDarwin sysctl
         )
       }

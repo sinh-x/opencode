@@ -16,6 +16,7 @@
         "x86_64-darwin"
       ];
       forEachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      rev = self.shortRev or self.dirtyShortRev or "dirty";
       bunVersion = "1.3.14";
     in
     {
