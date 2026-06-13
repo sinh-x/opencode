@@ -99,6 +99,10 @@ function View(props: { api: TuiPluginApi }) {
       branch: props.api.state.vcs?.branch,
       pollTick: pollTick(),
     })
+    if (typeof props.api.client.vcs?.summary !== "function") {
+      setLoading(false)
+      return
+    }
     const current = selectedRef()
     setLoading(true)
     void props.api.client.vcs
