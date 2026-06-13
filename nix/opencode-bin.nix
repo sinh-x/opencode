@@ -6,7 +6,6 @@
   ripgrep,
   installShellFiles,
   writableTmpDirAsHomeHook,
-  opencodeConfig,
 }:
 let
   version = "1.17.3";
@@ -41,12 +40,8 @@ stdenvNoCC.mkDerivation {
 
     install -Dm755 opencode $out/bin/opencode
 
-    mkdir -p $out/share/opencode
-    cp -r ${opencodeConfig}/. $out/share/opencode/
-
     wrapProgram $out/bin/opencode \
-      --prefix PATH : ${lib.makeBinPath [ ripgrep ]} \
-      --set-default OPENCODE_CONFIG_DIR $out/share/opencode
+      --prefix PATH : ${lib.makeBinPath [ ripgrep ]}
 
     runHook postInstall
   '';

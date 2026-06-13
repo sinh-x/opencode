@@ -34,17 +34,13 @@
       overlays = {
         default =
           final: _prev: {
-            opencode = final.callPackage ./nix/opencode-bin.nix {
-              opencodeConfig = self + "/.opencode";
-            };
+            opencode = final.callPackage ./nix/opencode-bin.nix { };
           };
       };
 
       packages = forEachSystem (
         pkgs: rec {
-          default = pkgs.callPackage ./nix/opencode-bin.nix {
-            opencodeConfig = self + "/.opencode";
-          };
+          default = pkgs.callPackage ./nix/opencode-bin.nix { };
           opencode = default;
         }
       );
