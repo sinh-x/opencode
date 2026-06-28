@@ -2,3 +2,4 @@ node_modules
 plans
 .gitignore
 references/
+package-lock.json
