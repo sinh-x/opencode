@@ -2,7 +2,7 @@ import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi } from "@opencode-a
 import type { BuiltinTuiPlugin } from "../builtins"
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 
-const id = "internal:sidebar-git-context"
+const id = "git-context"
 const kvRefGlobalKey = "sidebar_git_selected_ref"
 const refreshPollMs = 10_000
 const envKeys = ["PA_DEPLOYMENT_ID", "PA_MODE", "PA_TEAM", "PA_TICKET_ID", "PA_PROVIDER", "PA_MODEL"] as const
@@ -101,6 +101,10 @@ function View(props: { api: TuiPluginApi }) {
       branch: props.api.state.vcs?.branch,
       pollTick: pollTick(),
     })
+    if (typeof props.api.client.vcs?.summary !== "function") {
+      setLoading(false)
+      return
+    }
     const current = selectedRef()
     setLoading(true)
     void props.api.client.vcs

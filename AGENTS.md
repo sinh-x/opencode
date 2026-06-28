@@ -3,9 +3,6 @@
 - Keep runtime dependencies directed from Schema to Core and Protocol, then from Core and Protocol to Server. Client runtime code may depend on Schema and Protocol but never Core or Server; `sdk-next` composes Client, Core, and Server.
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
-- To regenerate the JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
-- The default branch in this repo is `dev`.
-- Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
 - Before making git changes, read `.opencode/branch-strategy.yaml` and `.opencode/skills/git-workflow/SKILL.md`; Sinh-specific work must branch from and target `sinh-x-dev`, never `dev`. `.claude` files are compatibility pointers only.
 - `script/upstream-status.sh` is report-only; branch sync actions require Sinh confirmation through `.opencode/skills/git-workflow/SKILL.md`.
 - Prefer automation: execute requested actions without confirmation unless blocked by missing info or safety/irreversibility.
