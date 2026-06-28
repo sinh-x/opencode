@@ -24,8 +24,8 @@ import {
   SessionPaths,
 } from "../../src/server/routes/instance/httpapi/groups/session"
 import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
-import { SessionsQuery } from "@opencode-ai/server/groups/session"
-import { SessionMessagesQuery } from "@opencode-ai/server/groups/message"
+import { SessionsQuery } from "@opencode-ai/protocol/groups/session"
+import { SessionMessagesQuery } from "@opencode-ai/protocol/groups/message"
 import { QueryBoolean, QueryBooleanOpenApi } from "../../src/server/routes/instance/httpapi/groups/query"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
