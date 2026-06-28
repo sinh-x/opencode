@@ -18,35 +18,9 @@ process.chdir(dir)
 const generated = await import("./generate.ts")
 
 import { Script } from "@opencode-ai/script"
-import pkg from "../package.json"
 
 const plugin = createSolidTransformPlugin()
 
-const createEmbeddedWebUIBundle = async () => {
-  console.log("Building Web UI to embed")
-  const appDir = path.join(dir, "../app")
-  const dist = path.join(appDir, "dist")
-  await $`OPENCODE_CHANNEL=${Script.channel} bun run --cwd ${appDir} build`
-  const files = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: dist })))
-    .map((file) => file.replaceAll("\\", "/"))
-    .filter((file) => !file.endsWith(".map"))
-    .sort()
-  const imports = files.map((file, i) => {
-    const spec = path.relative(dir, path.join(dist, file)).replaceAll("\\", "/")
-    return `import file_${i} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
-  })
-  const entries = files.map((file, i) => `  ${JSON.stringify(file)}: file_${i},`)
-  return [
-    "// Import all files as file_$i with type: \"file\"",
-    ...imports,
-    "// Export with original mappings",
-    "export default {",
-    ...entries,
-    "}",
-  ].join("\n")
-}
-
-const embeddedFileMap = await createEmbeddedWebUIBundle()
 const name = "opencode-linux-x64"
 
 await $`rm -rf dist`

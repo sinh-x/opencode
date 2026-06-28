@@ -232,6 +232,12 @@ const track = Effect.fnUntraced(function* (
   return yield* diffAgainstRef(git, cwd, ref, options)
 })
 
+const resolveRef = (refs: string[], selectedRef: string | undefined, defaultRef: string | undefined, fallback: string | undefined) => {
+  if (selectedRef && refs.includes(selectedRef)) return selectedRef
+  if (defaultRef && refs.includes(defaultRef)) return defaultRef
+  return fallback
+}
+
 export const Mode = Schema.Literals(["git", "branch"])
 export type Mode = Schema.Schema.Type<typeof Mode>
 
@@ -433,7 +439,7 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
         const refs = yield* git.refs(ctx.directory)
         const defaultRef = value.root?.ref
         const fallback = refs.includes("develop") ? "develop" : refs.includes("origin/develop") ? "origin/develop" : undefined
-        const resolved = selectedRef && refs.includes(selectedRef) ? selectedRef : refs.includes(defaultRef ?? "") ? defaultRef : fallback
+        const resolved = resolveRef(refs, selectedRef, defaultRef, fallback)
         if (!resolved || !value.current) {
           return {
             active_branch: value.current,
