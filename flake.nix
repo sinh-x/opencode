@@ -35,13 +35,19 @@
       overlays = {
         default =
           final: _prev: {
-            opencode = final.callPackage ./nix/opencode-bin.nix { };
+            opencode = final.callPackage ./nix/opencode-bin.nix {
+              inherit (bun.packages.${final.stdenv.hostPlatform.system}) bun;
+              src = self;
+            };
           };
       };
 
       packages = forEachSystem (
         pkgs: rec {
-          default = pkgs.callPackage ./nix/opencode-bin.nix { };
+          default = pkgs.callPackage ./nix/opencode-bin.nix {
+            inherit (bun.packages.${pkgs.stdenv.hostPlatform.system}) bun;
+            src = self;
+          };
           opencode = default;
         }
       );

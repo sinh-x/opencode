@@ -1,44 +1,49 @@
 {
   lib,
   stdenvNoCC,
-  fetchurl,
   makeBinaryWrapper,
   ripgrep,
   installShellFiles,
   writableTmpDirAsHomeHook,
+  bun,
+  nodejs,
+  src,
 }:
 let
-  version = "1.17.3";
-  sysInfo = {
-    x86_64-linux = { arch = "x64"; os = "linux"; ext = "tar.gz"; hash = "sha256-1L0jiiwf9WrKHNM5fSGgoxf1mSI0UXp/jir7vXIBCn0="; };
-    aarch64-linux = { arch = "arm64"; os = "linux"; ext = "tar.gz"; hash = "sha256-hhuMZs7VHW2aZup3POR+3mY6RL0X2De5whrPo0aIAeU="; };
-    x86_64-darwin = { arch = "x64"; os = "darwin"; ext = "zip"; hash = "sha256-O/pnpWfe5ECog4hugsgjox01kAKffrjXrkA+BWpD4E="; };
-    aarch64-darwin = { arch = "arm64"; os = "darwin"; ext = "zip"; hash = "sha256-tJlI+W2OksV31UhU4vA4OJ0Dw9+76sxEZDtzEjIQ/RM="; };
-  }.${stdenvNoCC.hostPlatform.system} or (throw "unsupported system: ${stdenvNoCC.hostPlatform.system}");
-  assetName = "opencode-${sysInfo.os}-${sysInfo.arch}.${sysInfo.ext}";
-  src = fetchurl {
-    url = "https://github.com/anomalyco/opencode/releases/download/v${version}/${assetName}";
-    hash = sysInfo.hash;
-  };
+  version = "1.17.11";
 in
 stdenvNoCC.mkDerivation {
   pname = "opencode";
   inherit version src;
 
-  sourceRoot = ".";
-
   nativeBuildInputs = [
+    bun
+    nodejs
     installShellFiles
     makeBinaryWrapper
     writableTmpDirAsHomeHook
   ];
 
-  dontAutoPatchelf = true;
+  env.OPENCODE_DISABLE_MODELS_FETCH = "true";
+  env.OPENCODE_VERSION = version;
+  env.OPENCODE_CHANNEL = "prod";
+
+  buildPhase = ''
+    runHook preBuild
+
+    export HOME=$(mktemp -d)
+    bun install --frozen-lockfile
+
+    cd ./packages/opencode
+    bun --bun ./script/build.ts --single --skip-install
+
+    runHook postBuild
+  '';
 
   installPhase = ''
     runHook preInstall
 
-    install -Dm755 opencode $out/bin/opencode
+    install -Dm755 dist/opencode-*/bin/opencode $out/bin/opencode
 
     wrapProgram $out/bin/opencode \
       --prefix PATH : ${lib.makeBinPath [ ripgrep ]}
@@ -48,7 +53,6 @@ stdenvNoCC.mkDerivation {
 
   postInstall = lib.optionalString (stdenvNoCC.buildPlatform.canExecute stdenvNoCC.hostPlatform) ''
     export HOME=$(mktemp -d)
-    $out/bin/opencode completion 2>/dev/null >/dev/null || true
     installShellCompletion --cmd opencode \
       --bash <($out/bin/opencode completion 2>/dev/null || echo "") \
       --zsh <(SHELL=/bin/zsh $out/bin/opencode completion 2>/dev/null || echo "")
