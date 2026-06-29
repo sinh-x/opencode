@@ -36,7 +36,7 @@
         default =
           final: _prev: {
             opencode = final.callPackage ./nix/opencode-bin.nix {
-              inherit (bun.packages.${final.stdenv.hostPlatform.system}) bun;
+              bun = final.callPackage ./nix/bun-bin.nix { version = "1.3.14"; };
               src = self;
             };
           };
@@ -45,7 +45,7 @@
       packages = forEachSystem (
         pkgs: rec {
           default = pkgs.callPackage ./nix/opencode-bin.nix {
-            inherit (bun.packages.${pkgs.stdenv.hostPlatform.system}) bun;
+            bun = pkgs.callPackage ./nix/bun-bin.nix { version = "1.3.14"; };
             src = self;
           };
           opencode = default;
