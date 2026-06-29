@@ -7,6 +7,7 @@
   writableTmpDirAsHomeHook,
   bun,
   nodejs,
+  node_modules,
   src,
 }:
 let
@@ -32,7 +33,7 @@ stdenvNoCC.mkDerivation {
     runHook preBuild
 
     export HOME=$(mktemp -d)
-    bun install --frozen-lockfile
+    cp -r ${node_modules}/node_modules .
 
     cd ./packages/opencode
     bun --bun ./script/build.ts --single --skip-install

@@ -35,17 +35,31 @@
       overlays = {
         default =
           final: _prev: {
+            node-modules = final.callPackage ./nix/node-modules.nix {
+              bun = final.callPackage ./nix/bun-bin.nix { version = "1.3.14"; };
+              src = self;
+            };
             opencode = final.callPackage ./nix/opencode-bin.nix {
               bun = final.callPackage ./nix/bun-bin.nix { version = "1.3.14"; };
+              node_modules = final.callPackage ./nix/node-modules.nix {
+                bun = final.callPackage ./nix/bun-bin.nix { version = "1.3.14"; };
+                src = self;
+              };
               src = self;
             };
           };
       };
 
       packages = forEachSystem (
-        pkgs: rec {
+        pkgs: let
+          node_modules = pkgs.callPackage ./nix/node-modules.nix {
+            bun = pkgs.callPackage ./nix/bun-bin.nix { version = "1.3.14"; };
+            src = self;
+          };
+        in rec {
           default = pkgs.callPackage ./nix/opencode-bin.nix {
             bun = pkgs.callPackage ./nix/bun-bin.nix { version = "1.3.14"; };
+            inherit node_modules;
             src = self;
           };
           opencode = default;
