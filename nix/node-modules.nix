@@ -15,8 +15,7 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     export HOME=$(mktemp -d)
-    bun install --no-cache
-    patchShebangs node_modules
+    bun install --no-cache --ignore-scripts
     mkdir -p $out
     cp -r node_modules $out/
   '';
