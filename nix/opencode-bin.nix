@@ -8,9 +8,9 @@
   writableTmpDirAsHomeHook,
 }:
 let
-  version = "1.17.3";
+  version = "1.17.11";
   sysInfo = {
-    x86_64-linux = { arch = "x64"; os = "linux"; ext = "tar.gz"; hash = "sha256-1L0jiiwf9WrKHNM5fSGgoxf1mSI0UXp/jir7vXIBCn0="; };
+    x86_64-linux = { arch = "x64"; os = "linux"; ext = "tar.gz"; hash = "sha256-au/Lu38EzbRkK+Ugjdv6uzw9J0+Ba/Qr/3LupcJE3KI="; };
     aarch64-linux = { arch = "arm64"; os = "linux"; ext = "tar.gz"; hash = "sha256-hhuMZs7VHW2aZup3POR+3mY6RL0X2De5whrPo0aIAeU="; };
     x86_64-darwin = { arch = "x64"; os = "darwin"; ext = "zip"; hash = "sha256-O/pnpWfe5ECog4hugsgjox01kAKffrjXrkA+BWpD4E="; };
     aarch64-darwin = { arch = "arm64"; os = "darwin"; ext = "zip"; hash = "sha256-tJlI+W2OksV31UhU4vA4OJ0Dw9+76sxEZDtzEjIQ/RM="; };
