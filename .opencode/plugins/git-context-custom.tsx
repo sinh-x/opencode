@@ -42,6 +42,7 @@ function View(props: { api: TuiPluginApi }) {
   const [loading, setLoading] = createSignal(true)
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
   const [stale, setStale] = createSignal(false)
+  const [error, setError] = createSignal<string | undefined>(undefined)
   const [pollTick, setPollTick] = createSignal(0)
   const branchFromState = createMemo(() => props.api.state.vcs?.branch)
   const selectedRefKeyMemo = createMemo(() =>
@@ -77,10 +78,12 @@ function View(props: { api: TuiPluginApi }) {
         setSummary(next.summary)
         setStale(next.stale)
       })
-      .catch(() => {
+      .catch((reason: unknown) => {
+        console.error("git-context-custom: vcs.summary failed", reason)
         const next = refreshState(summary(), undefined, true)
         setSummary(next.summary)
         setStale(next.stale)
+        setError(reason instanceof Error ? reason.message : "Git context unavailable")
       })
       .finally(() => setLoading(false))
   })
@@ -90,6 +93,12 @@ function View(props: { api: TuiPluginApi }) {
   const effectiveRef = createMemo(() => effectiveSelectedRef(summary(), selectedRef()))
   const commits = createMemo(() => summary()?.commit_rows.slice(0, maxCommitRows) ?? [])
   const diffRows = createMemo(() => summary()?.diff.rows.slice(0, maxDiffRows) ?? [])
+  const commitTotal = createMemo(() => summary()?.commit_total ?? 0)
+  const commitCount = createMemo(() => summary()?.commit_rows.length ?? 0)
+  const diffFileCount = createMemo(() => summary()?.diff.rows.length ?? 0)
+  const diffTotalFiles = createMemo(() => summary()?.diff.total_files ?? 0)
+  const diffAdditions = createMemo(() => summary()?.diff.additions ?? 0)
+  const diffDeletions = createMemo(() => summary()?.diff.deletions ?? 0)
 
   const openRefSelector = () => {
     const options = refOptions(availableRefs())
@@ -115,6 +124,9 @@ function View(props: { api: TuiPluginApi }) {
       <Show when={stale()}>
         <text fg={theme().warning}>[stale]</text>
       </Show>
+      <Show when={error()}>
+        <text fg={theme().error}>[error] {error()}</text>
+      </Show>
       <Show when={loading() && !summary()}>
         <text fg={theme().textMuted}>Loading git context...</text>
       </Show>
@@ -139,9 +151,9 @@ function View(props: { api: TuiPluginApi }) {
             </box>
             <text>
               <span style={{ fg: theme().textMuted }}>Commits: </span>
-              <span style={{ fg: theme().text }}>{summary()!.commit_rows.length}</span>
+              <span style={{ fg: theme().text }}>{commitCount()}</span>
               <span style={{ fg: theme().textMuted }}>/</span>
-              <span style={{ fg: theme().info }}>{summary()!.commit_total}</span>
+              <span style={{ fg: theme().info }}>{commitTotal()}</span>
             </text>
             <For each={commits()}>
               {(item) => (
@@ -154,13 +166,13 @@ function View(props: { api: TuiPluginApi }) {
             </For>
             <text>
               <span style={{ fg: theme().textMuted }}>Diff: </span>
-              <span style={{ fg: theme().diffAdded }}>+{summary()!.diff.additions}</span>
+              <span style={{ fg: theme().diffAdded }}>+{diffAdditions()}</span>
               <span style={{ fg: theme().textMuted }}> </span>
-              <span style={{ fg: theme().diffRemoved }}>-{summary()!.diff.deletions}</span>
+              <span style={{ fg: theme().diffRemoved }}>-{diffDeletions()}</span>
               <span style={{ fg: theme().textMuted }}> (</span>
-              <span style={{ fg: theme().text }}>{summary()!.diff.rows.length}</span>
+              <span style={{ fg: theme().text }}>{diffFileCount()}</span>
               <span style={{ fg: theme().textMuted }}>/</span>
-              <span style={{ fg: theme().info }}>{summary()!.diff.total_files}</span>
+              <span style={{ fg: theme().info }}>{diffTotalFiles()}</span>
               <span style={{ fg: theme().textMuted }}> files)</span>
             </text>
             <For each={diffRows()}>
@@ -190,7 +202,6 @@ const tui: TuiPlugin = async (api) => {
       },
     },
   })
-  api.lifecycle.onDispose(() => {})
 }
 
 const plugin = {
