@@ -23,7 +23,7 @@ echo "[recompute-hashes] system=$system"
 echo "[recompute-hashes] building .#node_modules_updater (fakeHash) to reveal FOD hash..."
 
 build_log=$(mktemp -t recompute-hashes.XXXXXX.log)
-trap 'rm -f "$build_log"' EXIT
+trap 'rm -f "$build_log" "$hashes_file.tmp"' EXIT
 
 # Build the updater; it is expected to fail with a hash mismatch that reveals
 # the real fixed-output hash.
