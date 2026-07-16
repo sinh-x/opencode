@@ -40,22 +40,20 @@ fi
 
 echo "[recompute-hashes] revealed hash: $new_hash"
 
-# Update hashes.json using nix's builtins to keep JSON formatting stable.
-tmp_json=$(mktemp -t hashes.XXXXXX.json)
-trap 'rm -f "$build_log" "$tmp_json"' EXIT
-
-nix eval --json --impure --expr "
-  let
-    existing = builtins.fromJSON (builtins.readFile $hashes_file);
-    updated = existing.nodeModules // { \"$system\" = \"$new_hash\"; };
-  in existing // { nodeModules = updated }
-" > "$tmp_json"
-
-# Pretty-print through nix for stable, readable output.
-nix eval --json --impure --expr "builtins.fromJSON (builtins.readFile $tmp_json)" \
-  | nix fmt 2>/dev/null \
-  || python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), indent=2))' \
-  > "$hashes_file"
+# Update hashes.json: merge the new hash into the nodeModules map for the
+# target system. Previously this used shell-interpolated variables inside a
+# `nix eval --impure --expr` string (an injection risk if values ever came
+# from untrusted sources). Now the merge is done in python3 with no DSL
+# interpolation; the script already depends on python3 for pretty-printing.
+python3 -c '
+import json, sys
+system = sys.argv[1]
+new_hash = sys.argv[2]
+with open(sys.argv[3]) as f:
+    data = json.load(f)
+data.setdefault("nodeModules", {})[system] = new_hash
+print(json.dumps(data, indent=2))
+' "$system" "$new_hash" "$hashes_file" > "$hashes_file.tmp" && mv "$hashes_file.tmp" "$hashes_file"
 
 echo "[recompute-hashes] updated $hashes_file for $system"
 cat "$hashes_file"

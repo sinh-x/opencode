@@ -48,6 +48,9 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   env.OPENCODE_DISABLE_MODELS_FETCH = true;
   env.OPENCODE_VERSION = finalAttrs.version;
   env.OPENCODE_CHANNEL = "prod";
+  # Pass the target Nix system so nix-build.ts derives the correct output
+  # directory name (e.g. dist/opencode-linux-x64, dist/opencode-darwin-arm64).
+  env.OPENCODE_TARGET = stdenvNoCC.hostPlatform.system;
 
   buildPhase = ''
     runHook preBuild
@@ -63,7 +66,9 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook preInstall
 
     mkdir -p $out/lib/opencode
-    cp -R dist/opencode-linux-x64/bin $out/lib/opencode/
+    # nix-build.ts writes to dist/opencode-<os>-<arch>/bin — match via glob so
+    # the install works for any target platform (linux-x64, darwin-arm64, etc.)
+    cp -R dist/opencode-*/bin $out/lib/opencode/
     install -Dm644 schema.json $out/share/opencode/schema.json
 
     makeWrapper ${bun}/bin/bun $out/bin/opencode \
@@ -92,6 +97,12 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     writableTmpDirAsHomeHook
   ];
   doInstallCheck = true;
+  # OPENCODE_VERSION and OPENCODE_CHANNEL are compile-time `define` constants
+  # (baked into the bundle by nix-build.ts), not runtime env vars — the `--version`
+  # flag reads the compile-time InstallationVersion constant, so they are not
+  # needed here. MODELS_DEV_API_JSON is only used by the providers/models
+  # commands, not by `--version`. OPENCODE_DISABLE_MODELS_FETCH is kept to
+  # suppress any network fetch attempt during the install check.
   versionCheckKeepEnvironment = [ "HOME" "OPENCODE_DISABLE_MODELS_FETCH" ];
   versionCheckProgramArg = "--version";
 

@@ -13,6 +13,7 @@
 # Usage:
 #   nix/scripts/regression-guard.sh            # check + build if needed
 #   nix/scripts/regression-guard.sh --force    # always build, ignore state
+#   nix/scripts/regression-guard.sh --ci       # skip local state, always build
 #   nix/scripts/regression-guard.sh --reset     # forget last-known-good, exit
 #   nix/scripts/regression-guard.sh --status   # report only, no build
 #
@@ -65,6 +66,7 @@ mode=check
 for arg in "$@"; do
   case "$arg" in
     --force) mode=force ;;
+    --ci) mode=ci ;;
     --reset) mode=reset ;;
     --status) mode=status ;;
     -h | --help)
@@ -82,7 +84,11 @@ if [[ "$mode" == "reset" ]]; then
 fi
 
 base=$(read_state)
-if [[ -z "$base" ]]; then
+if [[ "$mode" == "ci" ]]; then
+  echo "[regression-guard] --ci: ignoring local state, always building."
+  base=$(current_head)
+  must_build=1
+elif [[ -z "$base" ]]; then
   echo "[regression-guard] no prior known-good state recorded; will build."
   base=$(current_head)
   must_build=1
@@ -95,7 +101,9 @@ else
     must_build=0
   else
     echo "[regression-guard] changes detected since last known-good ($base):"
-    printf '  %s\n' $changes
+    while IFS= read -r line; do
+      printf '  %s\n' "$line"
+    done <<< "$changes"
     must_build=1
   fi
 fi

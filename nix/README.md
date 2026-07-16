@@ -77,12 +77,13 @@ What it does:
 Flags:
 
 - `--force` — rebuild even when no changes are detected.
+- `--ci` — skip local state, always build (for CI environments).
 - `--reset` — forget the stored known-good commit and exit (no build).
 - `--status` — report whether a build is needed; do not build.
 
 The guard is modeled after `script/upstream-status.sh` (report-only helpers)
-and exits 0 on success, non-zero on failure. CI adoption is deferred (FR-8 is a
-`Should`); this is a local-only check.
+and exits 0 on success, non-zero on failure. CI integration runs the guard in
+`--ci` mode (see `.github/workflows/nix-build.yml`).
 
 ## Files
 
@@ -98,3 +99,29 @@ and exits 0 on success, non-zero on failure. CI adoption is deferred (FR-8 is a
 - `scripts/regression-guard.sh` — source-build regression guard after upstream syncs
 - `desktop.nix` — desktop packaging (out of scope for the source-build work)
 - `POST-MORTEM.md` — prior attempt post-mortem
+
+## Bun workspace catalog removal
+
+The upstream root `package.json` defines a `catalog:` section that acts as a
+single source of truth for version pinning across all workspace packages. Each
+sub-package references dependencies via `catalog:` instead of a literal
+version string.
+
+This fork **removes** the `catalog:` section and inlines explicit version
+numbers into every `packages/*/package.json` (and the root `package.json`).
+The `bun.lock` is regenerated from the inlined versions.
+
+**Why:** Bun's catalog resolution happens at `bun install` time and depends on
+reading the workspace root `package.json` during dependency resolution. Inside
+a Nix fixed-output derivation (FOD), the source tree is filtered and the
+sandboxed `bun install` may not resolve `catalog:` references reliably. Inlined
+versions make the FOD reproducible and deterministic regardless of catalog
+resolution behavior.
+
+**Version-drift risk:** Because versions are now inlined, there is no
+automatic synchronization mechanism. When bumping a shared dependency, you must
+update it in every `packages/*/package.json` that references it. The `bun.lock`
+pins exact resolved versions regardless, so drift only matters at the
+`package.json` declaration level. A future lint rule or script could compare
+versions across package.json files to detect drift; until then, reviewers
+should verify version consistency when a shared dependency is bumped.

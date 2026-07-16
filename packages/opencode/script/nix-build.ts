@@ -24,7 +24,22 @@ const plugin = createSolidTransformPlugin()
 const version = process.env.OPENCODE_VERSION ?? Script.version
 const channel = process.env.OPENCODE_CHANNEL ?? Script.channel
 
-const name = "opencode-linux-x64"
+// Derive the output directory name from the target platform. The Nix
+// derivation passes OPENCODE_TARGET (a Nix system string like "x86_64-linux"
+// or "aarch64-darwin") so cross-compilation produces the right path. When not
+// set (e.g. local dev), fall back to the current host platform.
+function targetName(target: string | undefined): string {
+  if (target) {
+    const [arch, os] = target.split("-")
+    const osPart = os === "darwin" ? "darwin" : os === "linux" ? "linux" : os
+    const archPart = arch === "aarch64" ? "arm64" : arch === "x86_64" ? "x64" : arch
+    return `opencode-${osPart}-${archPart}`
+  }
+  const os = process.platform === "win32" ? "windows" : process.platform
+  return `opencode-${os}-${process.arch}`
+}
+
+const name = targetName(process.env.OPENCODE_TARGET)
 
 await $`rm -rf dist`
 await $`mkdir -p dist/${name}/bin`
