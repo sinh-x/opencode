@@ -21,6 +21,9 @@ import { Script } from "@opencode-ai/script"
 
 const plugin = createSolidTransformPlugin()
 
+const version = process.env.OPENCODE_VERSION ?? Script.version
+const channel = process.env.OPENCODE_CHANNEL ?? Script.channel
+
 const name = "opencode-linux-x64"
 
 await $`rm -rf dist`
@@ -32,7 +35,7 @@ const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : root
 const workerPath = "./src/cli/tui/worker.ts"
 const workerRelativePath = path.relative(dir, parserWorker).replaceAll("\\", "/")
 
-console.log(`building ${name}`)
+console.log(`building ${name} (version=${version}, channel=${channel})`)
 await Bun.build({
   conditions: ["node"],
   target: "bun",
@@ -45,11 +48,11 @@ await Bun.build({
   entrypoints: ["./src/index.ts"],
   outdir: `dist/${name}/bin`,
   define: {
-    OPENCODE_VERSION: `'${Script.version}'`,
+    OPENCODE_VERSION: `'${version}'`,
     OPENCODE_MODELS_DEV: generated.modelsData,
     OTUI_TREE_SITTER_WORKER_PATH: "/$bunfs/root/" + workerRelativePath,
     OPENCODE_WORKER_PATH: workerPath,
-    OPENCODE_CHANNEL: `'${Script.channel}'`,
+    OPENCODE_CHANNEL: `'${channel}'`,
     OPENCODE_LIBC: "'glibc'",
     "process.env.OPENTUI_LIBC": '"glibc"',
   },
