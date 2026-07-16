@@ -54,6 +54,36 @@ entries so `bun install` output is deterministic across builds. Verify
 stability by deleting the FOD store path and rebuilding; the revealed hash
 must be identical across two consecutive clean builds.
 
+## Regression guard
+
+After syncing upstream changes that touch `bun.lock` or anything under `nix/`,
+run the regression guard to confirm the source build still works:
+
+```sh
+nix/scripts/regression-guard.sh
+```
+
+What it does:
+
+1. Reads the last known-good commit from `.regression-guard.state`
+   (gitignored). On first run there is no state, so it builds immediately.
+2. Diffs the watched paths (`bun.lock` and `nix/`) between that commit and the
+   current working tree (including uncommitted changes).
+3. If relevant files changed, runs `nix build .#opencode` (override with the
+   `REGRESSION_GUARD_BUILD_CMD` environment variable).
+4. On success, records the current `HEAD` as the new known-good commit and
+   exits 0. On failure, exits non-zero without updating state.
+
+Flags:
+
+- `--force` — rebuild even when no changes are detected.
+- `--reset` — forget the stored known-good commit and exit (no build).
+- `--status` — report whether a build is needed; do not build.
+
+The guard is modeled after `script/upstream-status.sh` (report-only helpers)
+and exits 0 on success, non-zero on failure. CI adoption is deferred (FR-8 is a
+`Should`); this is a local-only check.
+
 ## Files
 
 - `flake.nix` — flake outputs (packages, devShells, overlays)
@@ -65,5 +95,6 @@ must be identical across two consecutive clean builds.
 - `scripts/canonicalize-node-modules.ts` — determinism normalization
 - `scripts/normalize-bun-binaries.ts` — determinism normalization
 - `scripts/recompute-hashes.sh` — local FOD hash recompute
+- `scripts/regression-guard.sh` — source-build regression guard after upstream syncs
 - `desktop.nix` — desktop packaging (out of scope for the source-build work)
 - `POST-MORTEM.md` — prior attempt post-mortem
