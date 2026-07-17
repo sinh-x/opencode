@@ -1,10 +1,9 @@
 import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
 
 const id = "git-context"
-const kvRefGlobalKey = "sidebar_git_selected_ref"
-const refreshPollMs = 10_000
+const kvRefKey = "sidebar_git_selected_ref"
 const envKeys = ["PA_DEPLOYMENT_ID", "PA_MODE", "PA_TEAM", "PA_TICKET_ID", "PA_PROVIDER", "PA_MODEL"] as const
 const secretPattern = /(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)/i
 
@@ -32,92 +31,23 @@ export function sidebarSelectedRef(summary: VcsBranchSummary | undefined, stored
   return summary.selected_ref
 }
 
-export function sidebarSelectedRefKey(worktree: string | undefined, directory: string | undefined, cwd: string = process.cwd()) {
-  const scope = worktree || directory || cwd
-  return `${kvRefGlobalKey}:${scope}`
-}
-
-export function sidebarStoredSelectedRef(repoValue: string | null, legacyValue: string | null) {
-  if (repoValue) return repoValue
-  return legacyValue ?? undefined
-}
-
-export function sidebarRefreshKey(input: {
-  selectedRef: string | undefined
-  selectedRefKey: string
-  branch: string | undefined
-  pollTick: number
-}) {
-  return [input.selectedRefKey, input.selectedRef, input.branch, String(input.pollTick)].join("\n")
-}
-
-export function sidebarRefreshState(
-  previousSummary: VcsBranchSummary | undefined,
-  nextSummary: VcsBranchSummary | undefined,
-  failed: boolean,
-) {
-  if (failed) {
-    return {
-      summary: previousSummary,
-      stale: Boolean(previousSummary),
-    }
-  }
-  return {
-    summary: nextSummary,
-    stale: false,
-  }
-}
-
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [loading, setLoading] = createSignal(true)
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
-  const [stale, setStale] = createSignal(false)
-  const [pollTick, setPollTick] = createSignal(0)
   const env = createMemo(() => sidebarLaunchEnv())
-  const selectedRefKey = createMemo(() =>
-    sidebarSelectedRefKey(props.api.state.path.worktree, props.api.state.path.directory),
-  )
-  const selectedRef = createMemo(() =>
-    sidebarStoredSelectedRef(
-      props.api.kv.get<string | null>(selectedRefKey(), null),
-      // Keep legacy global key fallback for users upgrading from pre-repo-scoped storage.
-      props.api.kv.get<string | null>(kvRefGlobalKey, null),
-    ),
-  )
+  const selectedRef = createMemo(() => props.api.kv.get<string | undefined>(kvRefKey, undefined))
 
   createEffect(() => {
-    const timer = setInterval(() => {
-      setPollTick((value) => value + 1)
-    }, refreshPollMs)
-    onCleanup(() => clearInterval(timer))
-  })
-
-  createEffect(() => {
-    // Call-only dependency tracking so branch/ref/poll updates retrigger the summary refresh.
-    sidebarRefreshKey({
-      selectedRef: selectedRef(),
-      selectedRefKey: selectedRefKey(),
-      branch: props.api.state.vcs?.branch,
-      pollTick: pollTick(),
-    })
-    if (typeof props.api.client.vcs?.summary !== "function") {
-      setLoading(false)
-      return
-    }
     const current = selectedRef()
     setLoading(true)
     void props.api.client.vcs
       .summary({ ref: current })
       .then((result) => {
-        const next = sidebarRefreshState(summary(), result.data, false)
-        setSummary(next.summary)
-        setStale(next.stale)
+        setSummary(result.data)
       })
       .catch(() => {
-        const next = sidebarRefreshState(summary(), undefined, true)
-        setSummary(next.summary)
-        setStale(next.stale)
+        setSummary(undefined)
       })
       .finally(() => {
         setLoading(false)
@@ -143,7 +73,7 @@ function View(props: { api: TuiPluginApi }) {
         current={effectiveRef()}
         options={options}
         onSelect={(item) => {
-          props.api.kv.set(selectedRefKey(), item.value)
+          props.api.kv.set(kvRefKey, item.value)
           props.api.ui.dialog.clear()
         }}
       />
@@ -157,20 +87,13 @@ function View(props: { api: TuiPluginApi }) {
           <text fg={theme().text}>
             <b>OPA Context</b>
           </text>
-          <For each={env()}>
-            {(item) => (
-              <text>
-                <span style={{ fg: theme().textMuted }}>{item.key}: </span>
-                <span style={{ fg: theme().info }}>{item.value}</span>
-              </text>
-            )}
-          </For>
+          <For each={env()}>{(item) => <text fg={theme().textMuted}>{item.key}: {item.value}</text>}</For>
         </box>
       </Show>
-      <Show when={loading() && !summary()}>
+      <Show when={loading()}>
         <text fg={theme().textMuted}>Loading git context...</text>
       </Show>
-      <Show when={summary()}>
+      <Show when={!loading() && summary()}>
         <Switch>
           <Match when={!activeBranch() || !effectiveRef()}>
             <text fg={theme().textMuted}>Git context unavailable</text>
@@ -180,59 +103,21 @@ function View(props: { api: TuiPluginApi }) {
               <text fg={theme().text}>
                 <b>Git Context</b>
               </text>
-              <Show when={stale()}>
-                <text fg={theme().warning}>[stale]</text>
-              </Show>
-              <text>
-                <span style={{ fg: theme().textMuted }}>Active: </span>
-                <span style={{ fg: theme().success }}>{activeBranch()}</span>
-              </text>
+              <text fg={theme().textMuted}>Active: {activeBranch()}</text>
               <box flexDirection="row" gap={1}>
-                <text>
-                  <span style={{ fg: theme().textMuted }}>Reference: </span>
-                  <span style={{ fg: theme().info }}>{effectiveRef()}</span>
-                </text>
+                <text fg={theme().textMuted}>Reference: {effectiveRef()}</text>
                 <Show when={availableRefs().length > 0}>
-                  <text fg={theme().warning} onMouseDown={openRefSelector}>[change]</text>
+                  <text fg={theme().text} onMouseDown={openRefSelector}>[change]</text>
                 </Show>
               </box>
-              <text>
-                <span style={{ fg: theme().textMuted }}>Commits: </span>
-                <span style={{ fg: theme().text }}>{summary()!.commit_rows.length}</span>
-                <span style={{ fg: theme().textMuted }}>/</span>
-                <span style={{ fg: theme().info }}>{summary()!.commit_total}</span>
+              <text fg={theme().textMuted}>
+                Commits: {summary()!.commit_rows.length}/{summary()!.commit_total}
               </text>
-              <For each={summary()!.commit_rows}>
-                {(item) => (
-                  <text>
-                    <span style={{ fg: theme().warning }}>{item.hash.slice(0, 7)}</span>
-                    <span style={{ fg: theme().textMuted }}> </span>
-                    <span style={{ fg: theme().textMuted }}>{item.subject}</span>
-                  </text>
-                )}
-              </For>
-              <text>
-                <span style={{ fg: theme().textMuted }}>Diff: </span>
-                <span style={{ fg: theme().diffAdded }}>+{summary()!.diff.additions}</span>
-                <span style={{ fg: theme().textMuted }}> </span>
-                <span style={{ fg: theme().diffRemoved }}>-{summary()!.diff.deletions}</span>
-                <span style={{ fg: theme().textMuted }}> (</span>
-                <span style={{ fg: theme().text }}>{summary()!.diff.rows.length}</span>
-                <span style={{ fg: theme().textMuted }}>/</span>
-                <span style={{ fg: theme().info }}>{summary()!.diff.total_files}</span>
-                <span style={{ fg: theme().textMuted }}> files)</span>
+              <For each={summary()!.commit_rows}>{(item) => <text fg={theme().textMuted}>{item.hash.slice(0, 7)} {item.subject}</text>}</For>
+              <text fg={theme().textMuted}>
+                Diff: +{summary()!.diff.additions} -{summary()!.diff.deletions} ({summary()!.diff.rows.length}/{summary()!.diff.total_files} files)
               </text>
-              <For each={summary()!.diff.rows}>
-                {(item) => (
-                  <text>
-                    <span style={{ fg: theme().textMuted }}>{item.file}</span>
-                    <span style={{ fg: theme().textMuted }}> </span>
-                    <span style={{ fg: theme().diffAdded }}>+{item.additions}</span>
-                    <span style={{ fg: theme().textMuted }}> </span>
-                    <span style={{ fg: theme().diffRemoved }}>-{item.deletions}</span>
-                  </text>
-                )}
-              </For>
+              <For each={summary()!.diff.rows}>{(item) => <text fg={theme().textMuted}>{item.file} +{item.additions} -{item.deletions}</text>}</For>
             </box>
           </Match>
         </Switch>
