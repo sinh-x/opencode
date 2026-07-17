@@ -1,6 +1,6 @@
 import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 
 const id = "git-context"
 const kvRefKey = "sidebar_git_selected_ref"
@@ -39,11 +39,12 @@ export function sidebarSelectedRef(summary: VcsBranchSummary | undefined, stored
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [loading, setLoading] = createSignal(true)
+  const [stale, setStale] = createSignal(false)
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
   const env = createMemo(() => sidebarLaunchEnv())
   const selectedRef = createMemo(() => props.api.kv.get<string | undefined>(kvRefKey, undefined))
 
-  createEffect(() => {
+  const refresh = () => {
     const current = selectedRef()
     props.api.state.vcs?.branch
     if (!props.api.kv.ready) return
@@ -52,14 +53,24 @@ function View(props: { api: TuiPluginApi }) {
       .summary({ ref: current })
       .then((result) => {
         setSummary(result.data)
+        setStale(false)
       })
       .catch((error) => {
         console.debug("[git-context] vcs.summary failed", error)
-        setSummary(undefined)
+        setStale(true)
       })
       .finally(() => {
         setLoading(false)
       })
+  }
+
+  createEffect(() => {
+    selectedRef()
+    props.api.state.vcs?.branch
+    if (!props.api.kv.ready) return
+    refresh()
+    const timer = setInterval(refresh, 10_000)
+    onCleanup(() => clearInterval(timer))
   })
 
   const availableRefs = createMemo(() => summary()?.available_refs ?? [])
@@ -104,8 +115,11 @@ function View(props: { api: TuiPluginApi }) {
           </For>
         </box>
       </Show>
-      <Show when={loading()}>
+      <Show when={loading() && !summary()}>
         <text fg={theme().textMuted}>Loading git context...</text>
+      </Show>
+      <Show when={stale() && summary()}>
+        <text fg={theme().textMuted}>(stale)</text>
       </Show>
       <Show when={!loading() && summary()}>
         <Switch>
