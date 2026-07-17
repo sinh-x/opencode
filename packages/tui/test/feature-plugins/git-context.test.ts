@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { sidebarLaunchEnv, sidebarSelectedRef } from "../../src/feature-plugins/sidebar/git-context"
+import {
+  reduceFetchSettled,
+  sidebarLaunchEnv,
+  sidebarSelectedRef,
+} from "../../src/feature-plugins/sidebar/git-context"
 
 type VcsBranchSummary = {
   active_branch?: string
@@ -140,6 +144,30 @@ describe("git-context utilities", () => {
       )
 
       expect(result).toBe("main")
+    })
+  })
+
+  describe("reduceFetchSettled", () => {
+    test("returns null when response is stale", () => {
+      const result = reduceFetchSettled(false, undefined, summary(), undefined)
+      expect(result).toBeNull()
+    })
+
+    test("returns settled data when current and no error", () => {
+      const data = summary({ active_branch: "main" })
+      const result = reduceFetchSettled(true, undefined, data, undefined)
+      expect(result).toEqual({ stale: false, summary: data })
+    })
+
+    test("marks stale and preserves previous summary on current error", () => {
+      const prev = summary({ active_branch: "main" })
+      const result = reduceFetchSettled(true, new Error("boom"), undefined, prev)
+      expect(result).toEqual({ stale: true, summary: prev })
+    })
+
+    test("marks stale with undefined summary when current error has no previous", () => {
+      const result = reduceFetchSettled(true, new Error("boom"), undefined, undefined)
+      expect(result).toEqual({ stale: true, summary: undefined })
     })
   })
 })

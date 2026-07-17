@@ -36,6 +36,17 @@ export function sidebarSelectedRef(summary: VcsBranchSummary | undefined, stored
   return summary.selected_ref
 }
 
+export function reduceFetchSettled(
+  isCurrent: boolean,
+  error: unknown,
+  data: VcsBranchSummary | undefined,
+  prevSummary: VcsBranchSummary | undefined,
+): { stale: boolean; summary: VcsBranchSummary | undefined } | null {
+  if (!isCurrent) return null
+  if (error) return { stale: true, summary: prevSummary }
+  return { stale: false, summary: data }
+}
+
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [loading, setLoading] = createSignal(true)
@@ -43,24 +54,30 @@ function View(props: { api: TuiPluginApi }) {
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
   const env = createMemo(() => sidebarLaunchEnv())
   const selectedRef = createMemo(() => props.api.kv.get<string | undefined>(kvRefKey, undefined))
+  let reqId = 0
 
   const refresh = () => {
     const current = selectedRef()
-    props.api.state.vcs?.branch
     if (!props.api.kv.ready) return
+    const thisReq = ++reqId
     setLoading(true)
     void props.api.client.vcs
       .summary({ ref: current })
       .then((result) => {
-        setSummary(result.data)
-        setStale(false)
+        const next = reduceFetchSettled(thisReq === reqId, undefined, result.data, summary())
+        if (!next) return
+        setSummary(next.summary)
+        setStale(next.stale)
       })
       .catch((error) => {
         console.debug("[git-context] vcs.summary failed", error)
-        setStale(true)
+        const next = reduceFetchSettled(thisReq === reqId, error, undefined, summary())
+        if (!next) return
+        setSummary(next.summary)
+        setStale(next.stale)
       })
       .finally(() => {
-        setLoading(false)
+        if (thisReq === reqId) setLoading(false)
       })
   }
 
@@ -121,7 +138,7 @@ function View(props: { api: TuiPluginApi }) {
       <Show when={stale() && summary()}>
         <text fg={theme().textMuted}>(stale)</text>
       </Show>
-      <Show when={!loading() && summary()}>
+      <Show when={summary()}>
         <Switch>
           <Match when={!activeBranch() || !effectiveRef()}>
             <text fg={theme().textMuted}>Git context unavailable</text>
