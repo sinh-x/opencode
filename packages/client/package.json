@@ -27,13 +27,13 @@
     }
   },
   "devDependencies": {
-    "@effect/platform-node": "catalog:",
+    "@effect/platform-node": "4.0.0-beta.83",
     "@opencode-ai/core": "workspace:*",
     "@opencode-ai/httpapi-codegen": "workspace:*",
     "@opencode-ai/server": "workspace:*",
-    "@tsconfig/bun": "catalog:",
-    "@types/bun": "catalog:",
-    "@typescript/native-preview": "catalog:",
-    "effect": "catalog:"
+    "@tsconfig/bun": "1.0.9",
+    "@types/bun": "1.3.14",
+    "@typescript/native-preview": "7.0.0-dev.20251207.1",
+    "effect": "4.0.0-beta.83"
   }
 }

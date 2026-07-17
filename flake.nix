@@ -7,7 +7,12 @@
   };
 
   outputs =
-    { self, nixpkgs, bun, ... }:
+    {
+      self,
+      nixpkgs,
+      bun,
+      ...
+    }:
     let
       systems = [
         "aarch64-linux"
@@ -34,15 +39,46 @@
 
       overlays = {
         default =
-          final: _prev: {
-            opencode = final.callPackage ./nix/opencode-bin.nix { };
+          final: _prev:
+          let
+            bunPinned = final.callPackage ./nix/bun-bin.nix { version = bunVersion; };
+            node_modules = final.callPackage ./nix/node_modules.nix {
+              inherit rev;
+              bun = bunPinned;
+            };
+            opencode = final.callPackage ./nix/opencode.nix {
+              inherit node_modules;
+              bun = bunPinned;
+            };
+          in
+          {
+            inherit opencode;
+            opencode-bin = final.callPackage ./nix/opencode-bin.nix { };
           };
       };
 
+
       packages = forEachSystem (
-        pkgs: rec {
-          default = pkgs.callPackage ./nix/opencode-bin.nix { };
-          opencode = default;
+        pkgs:
+        let
+          bunPinned = pkgs.callPackage ./nix/bun-bin.nix { version = bunVersion; };
+          node_modules = pkgs.callPackage ./nix/node_modules.nix {
+            inherit rev;
+            bun = bunPinned;
+          };
+          opencode = pkgs.callPackage ./nix/opencode.nix {
+            inherit node_modules;
+            bun = bunPinned;
+          };
+          opencode-bin = pkgs.callPackage ./nix/opencode-bin.nix { };
+        in
+        rec {
+          default = opencode;
+          inherit opencode opencode-bin;
+          # Updater derivation with fakeHash - build fails and reveals correct hash
+          node_modules_updater = node_modules.override {
+            hash = pkgs.lib.fakeHash;
+          };
         }
       );
     };

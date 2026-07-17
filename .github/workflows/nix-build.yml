@@ -1,0 +1,48 @@
+name: nix-build
+
+on:
+  pull_request:
+    paths:
+      - "bun.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "packages/opencode/script/nix-build.ts"
+      - ".github/workflows/nix-build.yml"
+  schedule:
+    # Weekly on Sunday at 04:00 UTC
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nix-build:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Nix
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+
+      - name: Build opencode from source (regression guard --ci)
+        run: |
+          set -euo pipefail
+          nix --version
+
+          # --ci mode: skip local state, always build. Exits 0 on success,
+          # non-zero on build failure.
+          nix/scripts/regression-guard.sh --ci
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Nix source build" >> "$GITHUB_STEP_SUMMARY"
+          echo "Status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"

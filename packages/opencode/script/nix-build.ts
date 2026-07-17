@@ -21,7 +21,25 @@ import { Script } from "@opencode-ai/script"
 
 const plugin = createSolidTransformPlugin()
 
-const name = "opencode-linux-x64"
+const version = process.env.OPENCODE_VERSION ?? Script.version
+const channel = process.env.OPENCODE_CHANNEL ?? Script.channel
+
+// Derive the output directory name from the target platform. The Nix
+// derivation passes OPENCODE_TARGET (a Nix system string like "x86_64-linux"
+// or "aarch64-darwin") so cross-compilation produces the right path. When not
+// set (e.g. local dev), fall back to the current host platform.
+function targetName(target: string | undefined): string {
+  if (target) {
+    const [arch, os] = target.split("-")
+    const osPart = os === "darwin" ? "darwin" : os === "linux" ? "linux" : os
+    const archPart = arch === "aarch64" ? "arm64" : arch === "x86_64" ? "x64" : arch
+    return `opencode-${osPart}-${archPart}`
+  }
+  const os = process.platform === "win32" ? "windows" : process.platform
+  return `opencode-${os}-${process.arch}`
+}
+
+const name = targetName(process.env.OPENCODE_TARGET)
 
 await $`rm -rf dist`
 await $`mkdir -p dist/${name}/bin`
@@ -32,7 +50,7 @@ const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : root
 const workerPath = "./src/cli/tui/worker.ts"
 const workerRelativePath = path.relative(dir, parserWorker).replaceAll("\\", "/")
 
-console.log(`building ${name}`)
+console.log(`building ${name} (version=${version}, channel=${channel})`)
 await Bun.build({
   conditions: ["node"],
   target: "bun",
@@ -45,11 +63,11 @@ await Bun.build({
   entrypoints: ["./src/index.ts"],
   outdir: `dist/${name}/bin`,
   define: {
-    OPENCODE_VERSION: `'${Script.version}'`,
+    OPENCODE_VERSION: `'${version}'`,
     OPENCODE_MODELS_DEV: generated.modelsData,
     OTUI_TREE_SITTER_WORKER_PATH: "/$bunfs/root/" + workerRelativePath,
     OPENCODE_WORKER_PATH: workerPath,
-    OPENCODE_CHANNEL: `'${Script.channel}'`,
+    OPENCODE_CHANNEL: `'${channel}'`,
     OPENCODE_LIBC: "'glibc'",
     "process.env.OPENTUI_LIBC": '"glibc"',
   },
