@@ -13,7 +13,12 @@ type VcsBranchSummary = {
   available_refs: string[]
   commit_total: number
   commit_rows: Array<{ hash: string; subject: string; author: string }>
-  diff: { total_files: number; additions: number; deletions: number; rows: Array<{ file: string; additions: number; deletions: number }> }
+  diff: {
+    total_files: number
+    additions: number
+    deletions: number
+    rows: Array<{ file: string; additions: number; deletions: number }>
+  }
 }
 
 export function sidebarLaunchEnv(source: NodeJS.ProcessEnv = process.env) {
@@ -40,13 +45,16 @@ function View(props: { api: TuiPluginApi }) {
 
   createEffect(() => {
     const current = selectedRef()
+    props.api.state.vcs?.branch
+    if (!props.api.kv.ready) return
     setLoading(true)
     void props.api.client.vcs
       .summary({ ref: current })
       .then((result) => {
         setSummary(result.data)
       })
-      .catch(() => {
+      .catch((error) => {
+        console.debug("[git-context] vcs.summary failed", error)
         setSummary(undefined)
       })
       .finally(() => {
@@ -87,7 +95,13 @@ function View(props: { api: TuiPluginApi }) {
           <text fg={theme().text}>
             <b>OPA Context</b>
           </text>
-          <For each={env()}>{(item) => <text fg={theme().textMuted}>{item.key}: {item.value}</text>}</For>
+          <For each={env()}>
+            {(item) => (
+              <text fg={theme().textMuted}>
+                {item.key}: {item.value}
+              </text>
+            )}
+          </For>
         </box>
       </Show>
       <Show when={loading()}>
@@ -107,17 +121,32 @@ function View(props: { api: TuiPluginApi }) {
               <box flexDirection="row" gap={1}>
                 <text fg={theme().textMuted}>Reference: {effectiveRef()}</text>
                 <Show when={availableRefs().length > 0}>
-                  <text fg={theme().text} onMouseDown={openRefSelector}>[change]</text>
+                  <text fg={theme().text} onMouseDown={openRefSelector}>
+                    [change]
+                  </text>
                 </Show>
               </box>
               <text fg={theme().textMuted}>
                 Commits: {summary()!.commit_rows.length}/{summary()!.commit_total}
               </text>
-              <For each={summary()!.commit_rows}>{(item) => <text fg={theme().textMuted}>{item.hash.slice(0, 7)} {item.subject}</text>}</For>
+              <For each={summary()!.commit_rows}>
+                {(item) => (
+                  <text fg={theme().textMuted}>
+                    {item.hash.slice(0, 7)} {item.subject}
+                  </text>
+                )}
+              </For>
               <text fg={theme().textMuted}>
-                Diff: +{summary()!.diff.additions} -{summary()!.diff.deletions} ({summary()!.diff.rows.length}/{summary()!.diff.total_files} files)
+                Diff: +{summary()!.diff.additions} -{summary()!.diff.deletions} ({summary()!.diff.rows.length}/
+                {summary()!.diff.total_files} files)
               </text>
-              <For each={summary()!.diff.rows}>{(item) => <text fg={theme().textMuted}>{item.file} +{item.additions} -{item.deletions}</text>}</For>
+              <For each={summary()!.diff.rows}>
+                {(item) => (
+                  <text fg={theme().textMuted}>
+                    {item.file} +{item.additions} -{item.deletions}
+                  </text>
+                )}
+              </For>
             </box>
           </Match>
         </Switch>

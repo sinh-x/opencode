@@ -59,12 +59,7 @@ describe("git-context utilities", () => {
       })
 
       expect(result).toHaveLength(4)
-      expect(result.map((e) => e.key).sort()).toEqual([
-        "PA_DEPLOYMENT_ID",
-        "PA_MODEL",
-        "PA_PROVIDER",
-        "PA_TEAM",
-      ])
+      expect(result.map((e) => e.key).sort()).toEqual(["PA_DEPLOYMENT_ID", "PA_MODEL", "PA_PROVIDER", "PA_TEAM"])
     })
 
     test("skips keys with only whitespace values", () => {
@@ -133,10 +128,7 @@ describe("git-context utilities", () => {
     })
 
     test("returns undefined when summary has no selected_ref and stored does not match available_refs", () => {
-      const result = sidebarSelectedRef(
-        summary({ available_refs: ["main"] }),
-        "unknown",
-      )
+      const result = sidebarSelectedRef(summary({ available_refs: ["main"] }), "unknown")
 
       expect(result).toBeUndefined()
     })
