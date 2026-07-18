@@ -47,7 +47,6 @@ await $`mkdir -p dist/${name}/bin`
 const localPath = path.resolve(dir, "node_modules/@opentui/core/parser.worker.js")
 const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
 const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
-const workerRelativePath = path.relative(dir, parserWorker).replaceAll("\\", "/")
 
 console.log(`building ${name} (version=${version}, channel=${channel})`)
 await Bun.build({
@@ -64,13 +63,37 @@ await Bun.build({
   define: {
     OPENCODE_VERSION: `'${version}'`,
     OPENCODE_MODELS_DEV: generated.modelsData,
-    OTUI_TREE_SITTER_WORKER_PATH: "/$bunfs/root/" + workerRelativePath,
-    OPENCODE_WORKER_PATH: '"./cli/tui/worker.js"',
+    // No OPENCODE_WORKER_PATH / OTUI_TREE_SITTER_WORKER_PATH defines: relative
+    // Worker specifiers resolve against cwd in Bun and $bunfs only exists in
+    // compiled binaries. Both call sites fall back to import.meta.url-relative
+    // resolution, which points next to the installed index.js.
     OPENCODE_CHANNEL: `'${channel}'`,
     OPENCODE_LIBC: "'glibc'",
     "process.env.OPENTUI_LIBC": '"glibc"',
   },
 })
+
+// Bundle the opentui tree-sitter parser worker next to index.js so the
+// import.meta.url fallback in @opentui/core resolveWorkerPath finds it.
+await Bun.build({
+  conditions: ["node"],
+  target: "bun",
+  format: "esm",
+  minify: true,
+  sourcemap: "none",
+  entrypoints: [parserWorker],
+  outdir: `dist/${name}/bin`,
+})
+
+// `@opentui/core-*` platform packages stay external (they dlopen a bundled
+// libopentui.so relative to their own files). Ship the target platform's
+// package in a real node_modules dir next to index.js so Bun's upward
+// resolution finds it at runtime.
+const nativeName = name.replace("opencode-", "core-")
+const nativePkg = fs.realpathSync(path.resolve(path.dirname(parserWorker), "..", nativeName))
+const nativeDest = `dist/${name}/bin/node_modules/@opentui/${nativeName}`
+await $`mkdir -p ${path.dirname(nativeDest)}`
+fs.cpSync(nativePkg, nativeDest, { recursive: true, dereference: true })
 
 await $`rm -rf ./dist/${name}/bin/tui`
 console.log("build complete")
