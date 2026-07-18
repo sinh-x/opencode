@@ -3,8 +3,7 @@ import type { BuiltinTuiPlugin } from "../builtins"
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 
 const id = "git-context"
-const kvRefGlobalKey = "sidebar_git_selected_ref"
-const refreshPollMs = 10_000
+const kvRefKey = "sidebar_git_selected_ref"
 const envKeys = ["PA_DEPLOYMENT_ID", "PA_MODE", "PA_TEAM", "PA_TICKET_ID", "PA_PROVIDER", "PA_MODEL"] as const
 const secretPattern = /(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)/i
 
@@ -14,7 +13,12 @@ type VcsBranchSummary = {
   available_refs: string[]
   commit_total: number
   commit_rows: Array<{ hash: string; subject: string; author: string }>
-  diff: { total_files: number; additions: number; deletions: number; rows: Array<{ file: string; additions: number; deletions: number }> }
+  diff: {
+    total_files: number
+    additions: number
+    deletions: number
+    rows: Array<{ file: string; additions: number; deletions: number }>
+  }
 }
 
 export function sidebarLaunchEnv(source: NodeJS.ProcessEnv = process.env) {
@@ -32,96 +36,58 @@ export function sidebarSelectedRef(summary: VcsBranchSummary | undefined, stored
   return summary.selected_ref
 }
 
-export function sidebarSelectedRefKey(worktree: string | undefined, directory: string | undefined, cwd: string = process.cwd()) {
-  const scope = worktree || directory || cwd
-  return `${kvRefGlobalKey}:${scope}`
-}
-
-export function sidebarStoredSelectedRef(repoValue: string | null, legacyValue: string | null) {
-  if (repoValue) return repoValue
-  return legacyValue ?? undefined
-}
-
-export function sidebarRefreshKey(input: {
-  selectedRef: string | undefined
-  selectedRefKey: string
-  branch: string | undefined
-  pollTick: number
-}) {
-  return [input.selectedRefKey, input.selectedRef, input.branch, String(input.pollTick)].join("\n")
-}
-
-export function sidebarRefreshState(
-  previousSummary: VcsBranchSummary | undefined,
-  nextSummary: VcsBranchSummary | undefined,
-  failed: boolean,
-) {
-  if (failed) {
-    return {
-      summary: previousSummary,
-      stale: Boolean(previousSummary),
-    }
-  }
-  return {
-    summary: nextSummary,
-    stale: false,
-  }
+export function reduceFetchSettled(
+  isCurrent: boolean,
+  error: unknown,
+  data: VcsBranchSummary | undefined,
+  prevSummary: VcsBranchSummary | undefined,
+): { stale: boolean; summary: VcsBranchSummary | undefined } | null {
+  if (!isCurrent) return null
+  if (error) return { stale: true, summary: prevSummary }
+  return { stale: false, summary: data }
 }
 
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [loading, setLoading] = createSignal(true)
-  const [summary, setSummary] = createSignal<VcsBranchSummary>()
   const [stale, setStale] = createSignal(false)
-  const [pollTick, setPollTick] = createSignal(0)
+  const [summary, setSummary] = createSignal<VcsBranchSummary>()
   const env = createMemo(() => sidebarLaunchEnv())
-  const selectedRefKey = createMemo(() =>
-    sidebarSelectedRefKey(props.api.state.path.worktree, props.api.state.path.directory),
-  )
-  const selectedRef = createMemo(() =>
-    sidebarStoredSelectedRef(
-      props.api.kv.get<string | null>(selectedRefKey(), null),
-      // Keep legacy global key fallback for users upgrading from pre-repo-scoped storage.
-      props.api.kv.get<string | null>(kvRefGlobalKey, null),
-    ),
-  )
+  const selectedRef = createMemo(() => props.api.kv.get<string | undefined>(kvRefKey, undefined))
+  let reqId = 0
 
-  createEffect(() => {
-    const timer = setInterval(() => {
-      setPollTick((value) => value + 1)
-    }, refreshPollMs)
-    onCleanup(() => clearInterval(timer))
-  })
-
-  createEffect(() => {
-    // Call-only dependency tracking so branch/ref/poll updates retrigger the summary refresh.
-    sidebarRefreshKey({
-      selectedRef: selectedRef(),
-      selectedRefKey: selectedRefKey(),
-      branch: props.api.state.vcs?.branch,
-      pollTick: pollTick(),
-    })
-    if (typeof props.api.client.vcs?.summary !== "function") {
-      setLoading(false)
-      return
-    }
+  const refresh = () => {
     const current = selectedRef()
+    if (!props.api.kv.ready) return
+    const thisReq = ++reqId
     setLoading(true)
     void props.api.client.vcs
       .summary({ ref: current })
       .then((result) => {
-        const next = sidebarRefreshState(summary(), result.data, false)
+        const next = reduceFetchSettled(thisReq === reqId, undefined, result.data, summary())
+        if (!next) return
         setSummary(next.summary)
         setStale(next.stale)
       })
-      .catch(() => {
-        const next = sidebarRefreshState(summary(), undefined, true)
+      .catch((error) => {
+        console.debug("[git-context] vcs.summary failed", error)
+        const next = reduceFetchSettled(thisReq === reqId, error, undefined, summary())
+        if (!next) return
         setSummary(next.summary)
         setStale(next.stale)
       })
       .finally(() => {
-        setLoading(false)
+        if (thisReq === reqId) setLoading(false)
       })
+  }
+
+  createEffect(() => {
+    selectedRef()
+    props.api.state.vcs?.branch
+    if (!props.api.kv.ready) return
+    refresh()
+    const timer = setInterval(refresh, 10_000)
+    onCleanup(() => clearInterval(timer))
   })
 
   const availableRefs = createMemo(() => summary()?.available_refs ?? [])
@@ -143,7 +109,7 @@ function View(props: { api: TuiPluginApi }) {
         current={effectiveRef()}
         options={options}
         onSelect={(item) => {
-          props.api.kv.set(selectedRefKey(), item.value)
+          props.api.kv.set(kvRefKey, item.value)
           props.api.ui.dialog.clear()
         }}
       />

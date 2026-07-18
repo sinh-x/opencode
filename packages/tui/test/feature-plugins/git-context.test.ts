@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import {
+  reduceFetchSettled,
   sidebarLaunchEnv,
-  sidebarRefreshKey,
-  sidebarRefreshState,
   sidebarSelectedRef,
-  sidebarSelectedRefKey,
-  sidebarStoredSelectedRef,
 } from "../../src/feature-plugins/sidebar/git-context"
 
 type VcsBranchSummary = {
@@ -66,12 +63,7 @@ describe("git-context utilities", () => {
       })
 
       expect(result).toHaveLength(4)
-      expect(result.map((e) => e.key).sort()).toEqual([
-        "PA_DEPLOYMENT_ID",
-        "PA_MODEL",
-        "PA_PROVIDER",
-        "PA_TEAM",
-      ])
+      expect(result.map((e) => e.key).sort()).toEqual(["PA_DEPLOYMENT_ID", "PA_MODEL", "PA_PROVIDER", "PA_TEAM"])
     })
 
     test("skips keys with only whitespace values", () => {
@@ -140,10 +132,7 @@ describe("git-context utilities", () => {
     })
 
     test("returns undefined when summary has no selected_ref and stored does not match available_refs", () => {
-      const result = sidebarSelectedRef(
-        summary({ available_refs: ["main"] }),
-        "unknown",
-      )
+      const result = sidebarSelectedRef(summary({ available_refs: ["main"] }), "unknown")
 
       expect(result).toBeUndefined()
     })
@@ -158,137 +147,27 @@ describe("git-context utilities", () => {
     })
   })
 
-  describe("sidebarSelectedRefKey", () => {
-    test("uses worktree when provided", () => {
-      const result = sidebarSelectedRefKey("/worktree/path", "/dir/path", "/cwd/path")
-
-      expect(result).toBe("sidebar_git_selected_ref:/worktree/path")
+  describe("reduceFetchSettled", () => {
+    test("returns null when response is stale", () => {
+      const result = reduceFetchSettled(false, undefined, summary(), undefined)
+      expect(result).toBeNull()
     })
 
-    test("falls back to directory when worktree is undefined", () => {
-      const result = sidebarSelectedRefKey(undefined, "/dir/path", "/cwd/path")
-
-      expect(result).toBe("sidebar_git_selected_ref:/dir/path")
+    test("returns settled data when current and no error", () => {
+      const data = summary({ active_branch: "main" })
+      const result = reduceFetchSettled(true, undefined, data, undefined)
+      expect(result).toEqual({ stale: false, summary: data })
     })
 
-    test("falls back to cwd when both worktree and directory are undefined", () => {
-      const result = sidebarSelectedRefKey(undefined, undefined, "/cwd/path")
-
-      expect(result).toBe("sidebar_git_selected_ref:/cwd/path")
+    test("marks stale and preserves previous summary on current error", () => {
+      const prev = summary({ active_branch: "main" })
+      const result = reduceFetchSettled(true, new Error("boom"), undefined, prev)
+      expect(result).toEqual({ stale: true, summary: prev })
     })
 
-    test("defaults cwd to process.cwd() when not provided", () => {
-      const result = sidebarSelectedRefKey(undefined, undefined)
-
-      expect(result).toBe(`sidebar_git_selected_ref:${process.cwd()}`)
-    })
-  })
-
-  describe("sidebarStoredSelectedRef", () => {
-    test("returns repoValue when present", () => {
-      const result = sidebarStoredSelectedRef("ref/repo", "ref/legacy")
-
-      expect(result).toBe("ref/repo")
-    })
-
-    test("falls back to legacyValue when repoValue is null", () => {
-      const result = sidebarStoredSelectedRef(null, "ref/legacy")
-
-      expect(result).toBe("ref/legacy")
-    })
-
-    test("falls back to legacyValue when repoValue is empty string", () => {
-      const result = sidebarStoredSelectedRef("", "ref/legacy")
-
-      expect(result).toBe("ref/legacy")
-    })
-
-    test("returns undefined when both values are null", () => {
-      const result = sidebarStoredSelectedRef(null, null)
-
-      expect(result).toBeUndefined()
-    })
-
-    test("returns undefined when repoValue is empty and legacyValue is null", () => {
-      const result = sidebarStoredSelectedRef("", null)
-
-      expect(result).toBeUndefined()
-    })
-  })
-
-  describe("sidebarRefreshKey", () => {
-    test("joins all fields with newlines", () => {
-      const result = sidebarRefreshKey({
-        selectedRefKey: "sidebar_git_selected_ref:/repo",
-        selectedRef: "main",
-        branch: "feat/test",
-        pollTick: 42,
-      })
-
-      expect(result).toBe("sidebar_git_selected_ref:/repo\nmain\nfeat/test\n42")
-    })
-
-    test("handles undefined selectedRef and branch as empty in join", () => {
-      const result = sidebarRefreshKey({
-        selectedRefKey: "sidebar_git_selected_ref:/repo",
-        selectedRef: undefined,
-        branch: undefined,
-        pollTick: 0,
-      })
-
-      expect(result).toBe("sidebar_git_selected_ref:/repo\n\n\n0")
-    })
-
-    test("handles pollTick zero", () => {
-      const result = sidebarRefreshKey({
-        selectedRefKey: "k",
-        selectedRef: undefined,
-        branch: undefined,
-        pollTick: 0,
-      })
-
-      expect(result).toBe("k\n\n\n0")
-    })
-  })
-
-  describe("sidebarRefreshState", () => {
-    test("on success returns nextSummary with stale=false", () => {
-      const next = summary({ selected_ref: "main" })
-      const result = sidebarRefreshState(undefined, next, false)
-
-      expect(result.summary).toBe(next)
-      expect(result.stale).toBe(false)
-    })
-
-    test("on success returns undefined nextSummary with stale=false", () => {
-      const result = sidebarRefreshState(undefined, undefined, false)
-
-      expect(result.summary).toBeUndefined()
-      expect(result.stale).toBe(false)
-    })
-
-    test("on failure preserves previousSummary and sets stale=true", () => {
-      const prev = summary({ selected_ref: "main" })
-      const result = sidebarRefreshState(prev, undefined, true)
-
-      expect(result.summary).toBe(prev)
-      expect(result.stale).toBe(true)
-    })
-
-    test("on failure with undefined previousSummary sets stale=false", () => {
-      const result = sidebarRefreshState(undefined, undefined, true)
-
-      expect(result.summary).toBeUndefined()
-      expect(result.stale).toBe(false)
-    })
-
-    test("on failure preserves previousSummary even when nextSummary is also provided", () => {
-      const prev = summary({ selected_ref: "main" })
-      const next = summary({ selected_ref: "dev" })
-      const result = sidebarRefreshState(prev, next, true)
-
-      expect(result.summary).toBe(prev)
-      expect(result.stale).toBe(true)
+    test("marks stale with undefined summary when current error has no previous", () => {
+      const result = reduceFetchSettled(true, new Error("boom"), undefined, undefined)
+      expect(result).toEqual({ stale: true, summary: undefined })
     })
   })
 })
