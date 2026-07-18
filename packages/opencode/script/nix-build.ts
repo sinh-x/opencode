@@ -47,7 +47,6 @@ await $`mkdir -p dist/${name}/bin`
 const localPath = path.resolve(dir, "node_modules/@opentui/core/parser.worker.js")
 const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
 const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
-const workerPath = "./src/cli/tui/worker.ts"
 const workerRelativePath = path.relative(dir, parserWorker).replaceAll("\\", "/")
 
 console.log(`building ${name} (version=${version}, channel=${channel})`)
@@ -60,13 +59,13 @@ await Bun.build({
   format: "esm",
   minify: true,
   sourcemap: "none",
-  entrypoints: ["./src/index.ts"],
+  entrypoints: ["./src/index.ts", "./src/cli/tui/worker.ts"],
   outdir: `dist/${name}/bin`,
   define: {
     OPENCODE_VERSION: `'${version}'`,
     OPENCODE_MODELS_DEV: generated.modelsData,
     OTUI_TREE_SITTER_WORKER_PATH: "/$bunfs/root/" + workerRelativePath,
-    OPENCODE_WORKER_PATH: workerPath,
+    OPENCODE_WORKER_PATH: '"./cli/tui/worker.js"',
     OPENCODE_CHANNEL: `'${channel}'`,
     OPENCODE_LIBC: "'glibc'",
     "process.env.OPENTUI_LIBC": '"glibc"',
