@@ -419,7 +419,8 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
         }
 
         if (!value.root) return []
-        if (value.current && value.current === value.root.name) return []
+        const current = yield* git.branch(ctx.directory)
+        if (current && current === value.root.name) return []
         const ref = yield* git.mergeBase(ctx.directory, value.root.ref)
         if (!ref) return []
         return yield* diffAgainstRef(git, ctx.directory, ref, options)
