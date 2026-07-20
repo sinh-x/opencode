@@ -19,6 +19,7 @@ export function Dialog(
   const renderer = useRenderer()
 
   let dismiss = false
+  let receivedMouseDown = false
   const width = () => {
     if (props.size === "xlarge") return 116
     if (props.size === "large") return 88
@@ -28,9 +29,12 @@ export function Dialog(
   return (
     <box
       onMouseDown={() => {
+        receivedMouseDown = true
         dismiss = !!renderer.getSelection()
       }}
       onMouseUp={() => {
+        if (!receivedMouseDown) return
+        receivedMouseDown = false
         if (dismiss) {
           dismiss = false
           return
