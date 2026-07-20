@@ -164,12 +164,54 @@ function toolPath(name: string): string | null {
   return Bun.which(name)
 }
 
-async function ghAuthenticated(): Promise<boolean> {
+/**
+ * SQ-2: verify the `gh` token has the `repo` scope required for `gh pr create`.
+ * `gh auth status` alone succeeds without the `repo` scope, leading to a
+ * late failure at PR creation time. We parse `gh auth status --show-token` for
+ * a `repo` scope entry, falling back to a canary `gh pr list --limit 1` which
+ * fails on a token without repo access.
+ *
+ * Returns an object with `authed` (authentication works) and `hasRepoScope`
+ * (the token can actually create PRs in this repo).
+ */
+async function ghRepoScopeStatus(): Promise<{ authed: boolean; hasRepoScope: boolean; detail: string }> {
+  // First: must be authenticated at all.
   try {
     await $`gh auth status`.quiet()
-    return true
   } catch {
-    return false
+    return { authed: false, hasRepoScope: false, detail: "gh auth status failed — run `gh auth login`" }
+  }
+  // Second: parse the scope list from `gh auth status --show-token`. The token
+  // scopes line looks like "Token scopes: gist, read:org, repo". Note: in
+  // GitHub Actions the GITHUB_TOKEN does not have `gh auth status` info, so
+  // fall back to the canary below.
+  try {
+    const out = await $`gh auth status --show-token`.quiet().text()
+    const scopeMatch = out.match(/scopes?:\s*([^\n]*)/i)
+    if (scopeMatch) {
+      const scopes = scopeMatch[1].split(",").map((s) => s.trim().toLowerCase())
+      const hasRepo = scopes.includes("repo") || scopes.includes("admin:repo_all")
+      if (hasRepo) return { authed: true, hasRepoScope: true, detail: "gh authenticated with repo scope" }
+      return {
+        authed: true,
+        hasRepoScope: false,
+        detail: `gh authenticated but missing repo scope (have: ${scopes.join(", ") || "none"})`,
+      }
+    }
+  } catch {
+    // Fall through to the canary check.
+  }
+  // Fallback canary: try a read-only `gh pr list --limit 1` which requires
+  // repo access. If it fails, the token cannot reach this repo's PRs.
+  try {
+    await $`gh pr list --limit 1`.quiet()
+    return { authed: true, hasRepoScope: true, detail: "gh authenticated (repo access verified via gh pr list canary)" }
+  } catch {
+    return {
+      authed: true,
+      hasRepoScope: false,
+      detail: "gh authenticated but `gh pr list` failed — token may lack repo scope for this repo",
+    }
   }
 }
 
@@ -196,11 +238,14 @@ async function checkTools(): Promise<CheckResult> {
 
 async function checkGhAuth(): Promise<CheckResult> {
   const start = Date.now()
-  const authed = await ghAuthenticated()
+  // SQ-2: verify both authentication AND repo scope so a missing `repo` scope
+  // fails early instead of at PR creation time.
+  const status = await ghRepoScopeStatus()
+  const ok = status.authed && status.hasRepoScope
   return {
     name: "gh-authenticated",
-    ok: authed,
-    message: authed ? "gh authenticated" : "gh auth status failed — run `gh auth login`",
+    ok,
+    message: status.detail,
     durationMs: Date.now() - start,
   }
 }
@@ -637,7 +682,7 @@ async function stepTypecheck(): Promise<StepResult> {
  * Post: branch pushed to origin, PR created, PR URL printed. On failure the
  * StepResult reports the error; main() aborts.
  */
-async function stepPushAndCreatePR(cfg: SyncConfig): Promise<StepResult> {
+async function stepPushAndCreatePR(cfg: SyncConfig, steps: VerificationItem[]): Promise<StepResult> {
   using _ = group("FR7 — push sync branch + create PR")
   const branch = syncBranchName()
   try {
@@ -646,7 +691,7 @@ async function stepPushAndCreatePR(cfg: SyncConfig): Promise<StepResult> {
     okLine(`pushed ${branch}`)
 
     const title = `chore(sync): merge upstream/dev into ${cfg.baseBranch} (${todayStamp()})`
-    const body = await buildPRBody(cfg)
+    const body = await buildPRBody(cfg, steps)
 
     okLine(`creating PR via \`gh pr create\`…`)
     const prOut = await $`gh pr create --base ${cfg.baseBranch} --head ${branch} --title ${title} --body ${body}`.text()
@@ -668,11 +713,27 @@ async function stepPushAndCreatePR(cfg: SyncConfig): Promise<StepResult> {
 }
 
 /**
+ * CQ-2: A completed verification step surfaced in the PR body. The `label` is
+ * the human-readable description; `ok` is true when the step succeeded. Steps
+ * that did not run (e.g. skipped via resume) are still reported as completed
+ * with a `skipped: true` flag so the PR body reflects what actually happened.
+ */
+interface VerificationItem {
+  label: string
+  ok: boolean
+  skipped?: boolean
+}
+
+/**
  * Build the PR body summarizing upstream changes. Uses `git log` between the
  * base branch and the sync branch HEAD — the merge commit + all upstream
  * commits brought in. Output is markdown-formatted for `gh pr create --body`.
+ *
+ * CQ-2: the verification checklist is built dynamically from the `steps`
+ * argument (collected in `main()`), so the PR body always reflects what
+ * actually ran instead of a hardcoded template that can drift from behavior.
  */
-async function buildPRBody(cfg: SyncConfig): Promise<string> {
+async function buildPRBody(cfg: SyncConfig, steps: VerificationItem[]): Promise<string> {
   const branch = syncBranchName()
   const base = cfg.baseBranch
   // Commits brought in by this sync (base branch HEAD..sync branch HEAD).
@@ -686,6 +747,20 @@ async function buildPRBody(cfg: SyncConfig): Promise<string> {
     ? commits.slice(0, 50).map((c) => `- ${c}`).join("\n")
     : "_no upstream commits detected by the diff range_"
   const trailer = commitCount > 50 ? `\n\n… and ${commitCount - 50} more (see full log in the branch).\n` : ""
+  // CQ-2: build the verification checklist from the actual step results. Each
+  // completed step is a checked box; a skipped step is a checked box with a
+  // "(skipped: <reason>)" suffix; a failed step would have aborted the run
+  // before this point, so we never expect `ok: false` here — but if it ever
+  // happens, render it as an unchecked box so a reviewer sees it.
+  const checklist = steps.length
+    ? steps
+        .map((s) => {
+          const box = s.ok ? "[x]" : "[ ]"
+          const suffix = s.skipped ? " _(skipped via resume)_" : ""
+          return `- ${box} ${s.label}${suffix}`
+        })
+        .join("\n")
+    : "- _(no step results recorded)_"
   return [
     `## Upstream Sync — ${todayStamp()}`,
     ``,
@@ -703,14 +778,10 @@ async function buildPRBody(cfg: SyncConfig): Promise<string> {
     ``,
     `### Verification`,
     ``,
-    `- [x] Pre-sync health checks passed (remotes, refs, worktree, branch)`,
-    `- [x] \`git merge --ff-only upstream/dev\` into \`dev\` succeeded`,
-    `- [x] Sync branch \`${branch}\` created from \`${base}\``,
-    `- [x] \`dev\` merged into \`${branch}\` (no conflicts)`,
-    `- [x] \`bun typecheck\` passed`,
+    checklist,
     ``,
     `---`,
-    `_Generated by \`script/sync-upstream.ts\` (Phase 4)._`,
+    `_Generated by \`script/sync-upstream.ts\` (Phase 4). Checklist built dynamically from step results (CQ-2)._`,
   ].join("\n")
 }
 
@@ -726,9 +797,10 @@ Usage:
 
 Options:
   --base-branch <name>   Branch the sync targets and that we must start on.
-                          Default: sinh-x-dev
+                           Default: sinh-x-dev
+                           Must match ^[a-zA-Z0-9][a-zA-Z0-9._/-]+$
   --dry-run              Run health checks only; skip the fetch + merge +
-                          typecheck + PR steps.
+                           typecheck + PR steps.
   -h, --help             Show this help and exit.
 
 Health checks (FR1) run in order; the script aborts on the first failure with a
@@ -765,6 +837,13 @@ handling. Phase 4 adds: typecheck gate + push + PR creation. Phase 5 (agent
 playbook) arrives in a later phase.`)
 }
 
+/** Safe-branch-name pattern (SQ-1): reject shell-significant characters. */
+const SAFE_BRANCH_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._/-]+$/
+
+function isValidBranchName(name: string): boolean {
+  return SAFE_BRANCH_NAME.test(name)
+}
+
 function parseCli(): SyncConfig {
   const { values } = parseArgs({
     options: {
@@ -782,6 +861,14 @@ function parseCli(): SyncConfig {
 
   const baseBranch = values["base-branch"]
   if (!baseBranch) abort("--base-branch requires a value")
+  // SQ-1: validate base-branch against a safe pattern before it flows into any
+  // shell command. Reject names containing spaces, semicolons, backticks, or
+  // other shell-significant characters.
+  if (!isValidBranchName(baseBranch)) {
+    abort(
+      `--base-branch "${baseBranch}" is not a valid branch name: must match ${SAFE_BRANCH_NAME.source} (alphanumeric start, only [a-zA-Z0-9._/-] afterwards)`,
+    )
+  }
 
   return {
     baseBranch,
@@ -805,6 +892,10 @@ async function main(): Promise<void> {
   console.log(`sync-upstream.ts — phase 4 (health + fetch + merge chain + typecheck + PR)`)
   console.log(`  base-branch: ${cfg.baseBranch}`)
   console.log(`  dry-run:     ${cfg.dryRun}`)
+
+  // CQ-2: collect verification items as the run progresses so the PR body's
+  // checklist reflects what actually happened (no hardcoded template).
+  const verification: VerificationItem[] = []
 
   // FR1 — pre-condition validation. Order: tools → gh auth → remotes → refs →
   // worktree → branch. Tools/auth first so later checks can rely on them.
@@ -837,6 +928,10 @@ async function main(): Promise<void> {
     failLine(`health checks exceeded 30s budget (NFR1): ${healthMs}ms`)
     abort(`NFR1 violation: health checks took ${healthMs}ms`)
   }
+  verification.push({
+    label: "Pre-sync health checks passed (tools, gh auth+scope, remotes, refs, worktree, branch)",
+    ok: true,
+  })
 
   if (cfg.dryRun) {
     console.log("\n--dry-run: skipping fetch + merge chain + typecheck + PR steps")
@@ -855,6 +950,11 @@ async function main(): Promise<void> {
     abort(devResult.message)
   }
   okLine(`${devResult.step}: ${devResult.message}`)
+  verification.push({
+    label: "`git merge --ff-only upstream/dev` into `dev` succeeded and pushed to origin/dev",
+    ok: true,
+    skipped: devResult.message.startsWith("skipped:"),
+  })
 
   // FR4/FR5 — create sync branch from <base-branch>, merge dev, detect conflicts.
   const syncResult = await stepCreateAndMergeSyncBranch(cfg)
@@ -869,6 +969,11 @@ async function main(): Promise<void> {
     abort(syncResult.message)
   }
   okLine(`${syncResult.step}: ${syncResult.message}`)
+  verification.push({
+    label: `Sync branch \`${syncBranchName()}\` created from \`${cfg.baseBranch}\` and \`dev\` merged in (no conflicts)`,
+    ok: true,
+    skipped: syncResult.message.startsWith("skipped:"),
+  })
 
   // ----- Phase 4: typecheck gate + push + PR creation (FR7, FR8, AC4, AC6) -----
 
@@ -882,9 +987,10 @@ async function main(): Promise<void> {
     abort(typecheckResult.message)
   }
   okLine(`${typecheckResult.step}: ${typecheckResult.message}`)
+  verification.push({ label: "`bun typecheck` passed", ok: true })
 
   // FR7/AC4 — push sync branch + create PR targeting the base branch.
-  const prResult = await stepPushAndCreatePR(cfg)
+  const prResult = await stepPushAndCreatePR(cfg, verification)
   if (prResult.status === "failed") {
     failLine(`${prResult.step}: ${prResult.message}`)
     await checkoutBranch(originalBranch).catch(() => {})
