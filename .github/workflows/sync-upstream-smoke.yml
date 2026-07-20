@@ -1,0 +1,47 @@
+name: sync-upstream-smoke
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "script/sync-upstream.ts"
+      - ".github/workflows/sync-upstream-smoke.yml"
+  pull_request:
+    branches: [dev, sinh-x-dev]
+    paths:
+      - "script/sync-upstream.ts"
+      - ".github/workflows/sync-upstream-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: sync-upstream.ts smoke test
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      # CQ-1: ensure the 904-line sync script loads, parses, and exits 0 on --help.
+      - name: --help exits 0
+        run: bun run script/sync-upstream.ts --help
+
+      # CQ-1 / SQ-1: ensure invalid --base-branch values are rejected before
+      # they can flow into any shell command. The script must exit non-zero.
+      - name: --base-branch rejects invalid input
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --base-branch "evil rm -rf /" 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for invalid --base-branch"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "not a valid branch name"; then
+            echo "FAIL: expected rejection message, got the above"
+            exit 1
+          fi
+          echo "OK: invalid --base-branch rejected with exit $code"

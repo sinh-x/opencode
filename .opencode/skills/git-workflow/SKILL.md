@@ -133,6 +133,157 @@ If `dev -> sinh-x-dev` cannot merge directly, ask Sinh before choosing one of th
 
 Do not target `dev` from `sync/upstream-<date>`. Do not merge `sinh-x-dev` into `dev` to resolve conflicts.
 
+## Agent Sync
+
+The agent-executable script `script/sync-upstream.ts` automates the upstream → dev → sinh-x-dev sync flow described in **Upstream Sync Flow** above. PA agents (builder, maintenance) MUST use this script instead of running the interactive git sequence by hand. The manual sequence above remains for non-PA / human-driven syncs.
+
+### Sync Branch Workflow
+
+The script always uses a dated sync branch to isolate the merge:
+
+```text
+upstream/dev -> dev -> sync/upstream-YYYY-MM-DD -> PR -> sinh-x-dev
+```
+
+- `dev` is fast-forward merged from `upstream/dev` and pushed to `origin/dev` (upstream mirror update only).
+- `sync/upstream-YYYY-MM-DD` is created from the base branch (`sinh-x-dev`, default) on the day the sync runs.
+- `dev` is merged into the sync branch.
+- If the merge is clean, the script runs `bun typecheck`, then pushes the sync branch and opens a PR targeting `sinh-x-dev` via `gh pr create`.
+- The PR review is the human gate — no auto-merge.
+- On conflict, the script halts and hands the merge back to the human (see **Failure Modes** below).
+
+### Invocation
+
+From the repository root:
+
+```bash
+bun run script/sync-upstream.ts            # full sync (health → fetch → merge → typecheck → push → PR)
+bun run script/sync-upstream.ts --dry-run  # health checks only; no mutations (safe, no confirmation needed)
+bun run script/sync-upstream.ts --base-branch <name>  # override the base branch (default: sinh-x-dev)
+bun run script/sync-upstream.ts --help      # show help and exit (safe, no confirmation needed)
+```
+
+Pre-conditions the script enforces itself (do not pre-run them by hand unless debugging):
+
+- Current branch is `sinh-x-dev` (or today's sync branch when resuming after a conflict resolution — see Resume).
+- Worktree is clean (no staged or unstaged changes).
+- `git`, `gh`, and `bun` are on `PATH`.
+- `gh auth status` succeeds.
+- `origin` and `upstream` remotes are configured.
+- `upstream/dev`, `origin/dev`, and `origin/<base-branch>` refs all resolve.
+
+### Confirmation Gates
+
+| Step | Mutation? | Confirmation required? |
+|---|---|---|
+| `--dry-run` (health checks only) | No | **No** — safe to run automatically |
+| `--help` | No | **No** — safe to run automatically |
+| Fetch (`git fetch origin && git fetch upstream`) | Remote read + ref update | **No** — does not touch the worktree |
+| FF-merge `upstream/dev` into `dev` + push `origin/dev` | Yes | **Yes** — ask Sinh before invoking the script without `--dry-run` |
+| Create `sync/upstream-YYYY-MM-DD` from base branch | Yes | **Yes** |
+| Merge `dev` into sync branch | Yes | **Yes** |
+| `bun typecheck` | No (build/read-only) | No |
+| Push sync branch to origin | Yes | **Yes** |
+| `gh pr create` targeting `sinh-x-dev` | Yes (opens PR) | **Yes** — PR review is the human gate |
+
+**Rule of thumb:** anything other than `--dry-run` or `--help` performs mutating git operations. Ask Sinh for explicit confirmation immediately before invoking the script without `--dry-run`. Do not infer permission from the fact that a sync was requested — get an explicit "go" first, each run.
+
+### Output Sections
+
+The script emits `::group::`/`::endgroup::` sections (GitHub Actions–friendly) so PA agents can parse the run. In order:
+
+1. **`Pre-sync health checks`** — six named checks, each printed as `  ✓ <name>: <message>` or `  ✗ <name>: <message>`. Ends with `all health checks passed in <ms>ms`.
+2. **`Fetch remotes`** — `fetching origin…` / `fetched origin` then the same for `upstream`.
+3. **`FR3 — ff-merge upstream/dev into dev, push origin/dev`** — `checked out dev` → `ff-only merged upstream/dev into dev` → `pushed dev to origin/dev`. On resume: `dev already at upstream/dev and pushed — skipping (resume)`.
+4. **`FR4 — create sync branch, merge dev`** — `created sync/upstream-YYYY-MM-DD from sinh-x-dev` → `merging dev into …` → `merged dev into sync/upstream-YYYY-MM-DD`. On resume: `sync/upstream-YYYY-MM-DD already exists with dev merged — skipping (resume)`.
+5. **`FR8 — bun typecheck (post-merge gate)`** — `running \`bun typecheck\` from repo root…` → `typecheck passed`.
+6. **`FR7 — push sync branch + create PR`** — `pushing <branch> to origin…` → `pushed <branch>` → `creating PR via \`gh pr create\`…` → `PR created: <url>`.
+7. **Final line** — `✓ phase 4 complete: typecheck passed, sync branch pushed, PR created` followed by `next: phase 5 (agent playbook)`.
+
+Each step reports via the `okLine`/`failLine` convention (`  ✓` / `  ✗`). Step results are also surfaced as a `<step>: <message>` summary line after each section.
+
+### Exit Codes
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `0` | Success — all steps completed (or `--dry-run` health checks passed) | Report the PR URL to Sinh; await PR review |
+| `1` | Error — a health check, fetch, merge (non-conflict), typecheck, push, or PR-creation step failed | See **Failure Modes** below |
+| `2` | Conflicts detected — human resolution required (FR5/AC3) | See **Conflict (exit 2)** failure mode below |
+
+### Failure Modes
+
+Each failure mode lists: trigger, what the script did to the repo (NFR2 — never leaves a dirty worktree or detached HEAD), and what the agent must do next.
+
+#### Dirty worktree (health check `worktree-clean`)
+- **Trigger:** `git status --porcelain` reports any uncommitted changes.
+- **Repo state:** untouched — no mutation ran.
+- **Agent action:** report the dirty files to Sinh, ask Sinh to commit or stash, then re-run. Do not run any mutating step until the worktree is clean.
+
+#### Wrong branch (health check `correct-branch`)
+- **Trigger:** current branch is not `sinh-x-dev` (and not today's sync branch with the merge already committed — see Resume).
+- **Repo state:** untouched.
+- **Agent action:** report the found branch vs expected branch to Sinh. Do **not** switch branches yourself if you are in implement mode (branch management is the orchestrator's responsibility). Hand back to the orchestrator or ask Sinh to check out `sinh-x-dev`.
+
+#### Missing tools / gh auth / remotes / refs (health checks `tools-available`, `gh-authenticated`, `remotes-configured`, `refs-exist`)
+- **Trigger:** `git`/`gh`/`bun` missing from `PATH`, `gh auth status` fails, `origin`/`upstream` remotes absent, or required refs do not resolve.
+- **Repo state:** untouched.
+- **Agent action:** report the named failing check and its message to Sinh. For gh auth, suggest `gh auth login`. For missing remotes, suggest the `git remote add` command. For missing refs, suggest `git fetch origin upstream`. Do not proceed until the named check passes.
+
+#### Merge conflict (exit code `2`, step `create-and-merge-sync-branch`)
+- **Trigger:** `git merge dev` into the sync branch produces conflicts.
+- **Repo state:** the in-progress merge is **left in place** on the sync branch (not aborted) so the human can resolve in-tree. The worktree will show unmerged entries — this is expected.
+- **Script output:** prints `✗ MERGE CONFLICTS DETECTED — human resolution required`, the step name, message, file count, and each conflicting file path, followed by four-step resolution instructions.
+- **Agent action:**
+  1. Report the conflicting files list to Sinh.
+  2. Ask Sinh to resolve each conflict: edit → `git add <file>` → `git commit --no-edit`.
+  3. After Sinh confirms the merge is committed and the worktree is clean, **re-run the script**. It will detect the sync branch already has `dev` merged (`syncBranchStepAlreadyDone`) and skip to the typecheck step — no manual state cleanup. (FR6/AC5)
+  4. If Sinh prefers to abort instead, run `git merge --abort` and re-run the script from scratch.
+- **Do not** resolve the conflicts yourself unless Sinh explicitly delegates it — merge-conflict resolution is a human-judgment step (Non-Goal).
+
+#### Typecheck failure (step `typecheck`, exit code `1`)
+- **Trigger:** `bun typecheck` returns non-zero after the merge chain succeeds.
+- **Repo state:** sync branch is left in place (merged dev intact) for inspection. The script restores the original branch so the repo is not unexpectedly left on the sync branch.
+- **Agent action:** report the typecheck error message to Sinh. The fix must land on the sync branch (or upstream must be patched). After Sinh fixes the typecheck error, re-run the script — the merge-chain steps will skip via their resume predicates and the run jumps straight to typecheck. (FR6/AC5)
+
+#### Push failure (step `push-and-create-pr`, exit code `1`)
+- **Trigger:** `git push -u origin <sync-branch>` fails (auth, network, or remote rejection).
+- **Repo state:** sync branch intact locally; nothing pushed. Original branch restored.
+- **Agent action:** report the push error to Sinh. For auth issues, suggest `gh auth login` / SSH key check. For remote rejection, suggest `git fetch origin` and re-attempt. Re-run after the cause is resolved — typecheck will skip via resume, push retries.
+
+#### PR creation failure (step `push-and-create-pr`, exit code `1`)
+- **Trigger:** `gh pr create` fails (auth scope, duplicate PR, network).
+- **Repo state:** sync branch already pushed to origin; PR not created. Original branch restored.
+- **Agent action:** report the `gh` error to Sinh. For auth scope, suggest `gh auth refresh -h github.com -s repo`. For "already a PR exists", surface the existing PR URL via `gh pr list --head <branch>`. Re-run after the cause is resolved — push is idempotent (`git push -u` is a no-op if already pushed), and `gh pr create` will succeed once the blocker clears.
+
+#### FF-merge / dev push failure (step `merge-dev-from-upstream`, exit code `1`)
+- **Trigger:** `git merge --ff-only upstream/dev` rejects (non-fast-forward → upstream force-pushed) or `git push origin dev` fails.
+- **Repo state:** any in-progress merge aborted and original branch restored (NFR2).
+- **Agent action:** for non-fast-forward, report upstream force-push to Sinh and stop — do not attempt a non-ff merge. For push failure, report and retry after the cause clears.
+
+### Resume
+
+The script is idempotent and resumable. Re-running after a halt (conflict, interrupt, or failure) detects completed steps via git ref comparison — no state file, no manual cleanup:
+
+- **FR3 step skips** when local `dev` == `upstream/dev` HEAD **and** `origin/dev` matches (i.e. the ff-only merge + push both finished).
+- **FR4 step skips** when today's `sync/upstream-YYYY-MM-DD` branch exists **and** `dev` is an ancestor of its HEAD (i.e. the merge is already committed — covers both clean-merge and human-resolved-and-committed cases).
+- **Typecheck step re-runs** every time (it is read-only and cheap; no resume predicate).
+- **Push step re-runs** every time; `git push -u` is idempotent if the branch is already up to date.
+- **`gh pr create`** is not idempotent — if a PR already exists for the head branch, `gh` errors. Use `gh pr list --head <branch>` to surface it instead of re-running `gh pr create` blindly.
+
+The `correct-branch` health check tolerates being on today's sync branch when the merge is already committed — so the resume path does not require the human to switch back to `sinh-x-dev` first.
+
+### Agent Checklist (sync script path)
+
+Before invoking `bun run script/sync-upstream.ts` without `--dry-run`:
+
+- Read this SKILL.md section in full.
+- Run `bun run script/sync-upstream.ts --dry-run` first and share the output with Sinh.
+- Confirm with Sinh that a full sync run is approved.
+- Confirm the current branch is `sinh-x-dev` (the script enforces this; do not pre-switch).
+- After the run, report the PR URL (exit 0), the conflict file list (exit 2), or the failing step + message (exit 1) to Sinh.
+- On exit 2, hand the conflict list to Sinh; after Sinh commits the resolution and confirms a clean worktree, re-run the script (do not switch branches — the resume path handles it).
+- On exit 1, report the failing step name from the script's output and stop — do not retry blindly. Identify the failure mode above and follow the corresponding agent action.
+
 ## Prohibited Flows
 
 - Do not merge `sinh-x-dev` into `dev`.
