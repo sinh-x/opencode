@@ -19,10 +19,19 @@
  *   - Clean abort on conflict: `git merge --abort` restores the worktree when
  *     the conflict is detected before any partial commit (NFR2).
  *
- * Later phases (typecheck gate, PR creation, playbook) are intentionally NOT
- * implemented here. This file is the skeleton those phases extend.
+ * Phase 4 (this implementation): typecheck gate + PR creation.
+ *   - `bun typecheck` runs from repo root after the merge chain succeeds but
+ *     before any push/PR creation (FR8, AC6). Failure halts the run with a
+ *     clear report and leaves the sync branch in place for inspection.
+ *   - On typecheck pass, the sync branch is pushed to origin and a PR is
+ *     created via `gh pr create` targeting the base branch with a
+ *     conventional-commit title and a summary of upstream changes (FR7, AC4).
+ *   - PR title format: `chore(sync): merge upstream/dev into sinh-x-dev
+ *     (YYYY-MM-DD)`.
+ *   - Structured output via `::group::` / `::endgroup::` for PA-agent
+ *     parsability (NFR6).
  *
- * Traceability: FR1-FR6, NFR1-NFR4, AC1-AC3, AC5.
+ * Traceability: FR1-FR8, NFR1-NFR4, NFR6, AC1-AC6.
  */
 
 import { $ } from "bun"
@@ -587,6 +596,125 @@ function reportConflictsAndHalt(result: StepResult): never {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4 — Typecheck gate (FR8, AC6) + push + PR creation (FR7, AC4)
+// ---------------------------------------------------------------------------
+
+/**
+ * FR8/AC6: run `bun typecheck` from the repo root. Halts the run on failure
+ * before any push/PR creation (so a broken merge never produces a PR). The
+ * failing step name + message are surfaced to the caller via the StepResult.
+ *
+ * The script never modifies the repo on typecheck failure: the sync branch is
+ * left in place with the merged dev for the human to inspect and fix. Re-run
+ * after fixing the typecheck error — the merge-chain steps skip via their
+ * resume predicates (FR6/AC5), so the next run jumps straight to typecheck.
+ */
+async function stepTypecheck(): Promise<StepResult> {
+  using _ = group("FR8 — bun typecheck (post-merge gate)")
+  try {
+    okLine("running `bun typecheck` from repo root…")
+    await $`bun typecheck`
+    okLine("typecheck passed")
+    return { step: "typecheck", status: "completed", message: "bun typecheck passed" }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return {
+      step: "typecheck",
+      status: "failed",
+      message: `bun typecheck failed (sync branch left in place for inspection): ${msg}`,
+    }
+  }
+}
+
+/**
+ * FR7/AC4: push the sync branch to origin and create a PR targeting the base
+ * branch via `gh pr create`. Title follows the conventional-commit form:
+ *   chore(sync): merge upstream/dev into sinh-x-dev (YYYY-MM-DD)
+ * The PR body summarizes the upstream changes via `git log` between the base
+ * branch and the sync branch HEAD.
+ *
+ * Pre: typecheck passed (caller enforces). Sync branch is checked out.
+ * Post: branch pushed to origin, PR created, PR URL printed. On failure the
+ * StepResult reports the error; main() aborts.
+ */
+async function stepPushAndCreatePR(cfg: SyncConfig): Promise<StepResult> {
+  using _ = group("FR7 — push sync branch + create PR")
+  const branch = syncBranchName()
+  try {
+    okLine(`pushing ${branch} to ${cfg.remotes.origin}…`)
+    await $`git push -u ${cfg.remotes.origin} ${branch}`
+    okLine(`pushed ${branch}`)
+
+    const title = `chore(sync): merge upstream/dev into ${cfg.baseBranch} (${todayStamp()})`
+    const body = await buildPRBody(cfg)
+
+    okLine(`creating PR via \`gh pr create\`…`)
+    const prOut = await $`gh pr create --base ${cfg.baseBranch} --head ${branch} --title ${title} --body ${body}`.text()
+    const prUrl = prOut.trim()
+    okLine(`PR created: ${prUrl}`)
+    return {
+      step: "push-and-create-pr",
+      status: "completed",
+      message: `pushed ${branch} and created PR: ${prUrl}`,
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return {
+      step: "push-and-create-pr",
+      status: "failed",
+      message: `push or PR creation failed: ${msg}`,
+    }
+  }
+}
+
+/**
+ * Build the PR body summarizing upstream changes. Uses `git log` between the
+ * base branch and the sync branch HEAD — the merge commit + all upstream
+ * commits brought in. Output is markdown-formatted for `gh pr create --body`.
+ */
+async function buildPRBody(cfg: SyncConfig): Promise<string> {
+  const branch = syncBranchName()
+  const base = cfg.baseBranch
+  // Commits brought in by this sync (base branch HEAD..sync branch HEAD).
+  const logOut = await $`git log --oneline --no-merges ${base}..${branch}`.text().catch(() => "")
+  const commits = logOut
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const commitCount = commits.length
+  const commitList = commits.length > 0
+    ? commits.slice(0, 50).map((c) => `- ${c}`).join("\n")
+    : "_no upstream commits detected by the diff range_"
+  const trailer = commitCount > 50 ? `\n\n… and ${commitCount - 50} more (see full log in the branch).\n` : ""
+  return [
+    `## Upstream Sync — ${todayStamp()}`,
+    ``,
+    `This PR merges \`upstream/dev\` into \`${cfg.baseBranch}\` via the sync branch \`${branch}\`.`,
+    ``,
+    `- **Sync branch:** \`${branch}\``,
+    `- **Base branch:** \`${base}\``,
+    `- **Upstream ref:** \`upstream/dev\``,
+    `- **Commits brought in:** ${commitCount}`,
+    ``,
+    `### Commits`,
+    ``,
+    commitList,
+    trailer,
+    ``,
+    `### Verification`,
+    ``,
+    `- [x] Pre-sync health checks passed (remotes, refs, worktree, branch)`,
+    `- [x] \`git merge --ff-only upstream/dev\` into \`dev\` succeeded`,
+    `- [x] Sync branch \`${branch}\` created from \`${base}\``,
+    `- [x] \`dev\` merged into \`${branch}\` (no conflicts)`,
+    `- [x] \`bun typecheck\` passed`,
+    ``,
+    `---`,
+    `_Generated by \`script/sync-upstream.ts\` (Phase 4)._`,
+  ].join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -599,7 +727,8 @@ Usage:
 Options:
   --base-branch <name>   Branch the sync targets and that we must start on.
                           Default: sinh-x-dev
-  --dry-run              Run health checks only; skip the fetch + merge steps.
+  --dry-run              Run health checks only; skip the fetch + merge +
+                          typecheck + PR steps.
   -h, --help             Show this help and exit.
 
 Health checks (FR1) run in order; the script aborts on the first failure with a
@@ -608,6 +737,12 @@ Merge chain (FR3-FR5) runs after fetch:
   - ff-only merge upstream/dev into dev, push origin/dev  (FR3)
   - create sync/upstream-YYYY-MM-DD from <base-branch>   (FR4)
   - merge dev into the sync branch; halt on conflict      (FR4/FR5)
+
+Phase 4 — typecheck gate + PR creation (FR7, FR8, AC4, AC6):
+  - run \`bun typecheck\` from repo root; halt on failure  (FR8)
+  - push sync branch to origin                           (FR7)
+  - create PR via \`gh pr create\` targeting <base-branch> (FR7/AC4)
+    title: chore(sync): merge upstream/dev into <base-branch> (YYYY-MM-DD)
 
 Resume (FR6/AC5 — Phase 3):
   Re-running the script after a halt (conflict, interrupt, or failure) detects
@@ -620,12 +755,14 @@ Resume (FR6/AC5 — Phase 3):
   the script. The worktree must be clean before re-run (FR1 precondition).
 
 Exit codes:
-  0   success (health + fetch + merge chain all complete, or --dry-run checks pass)
-  1   a health check, fetch, or merge step failed
+  0   success (health + fetch + merge chain + typecheck + push/PR all complete,
+       or --dry-run checks pass)
+  1   a health check, fetch, merge, typecheck, or PR step failed
   2   merge conflicts detected — human resolution required (FR5/AC3)
 
 Phase 1+2+3 scope: health checks, fetch, merge chain, resume + conflict
-handling. Typecheck gate, PR creation, and agent playbook arrive in later phases.`)
+handling. Phase 4 adds: typecheck gate + push + PR creation. Phase 5 (agent
+playbook) arrives in a later phase.`)
 }
 
 function parseCli(): SyncConfig {
@@ -665,7 +802,7 @@ function parseCli(): SyncConfig {
 async function main(): Promise<void> {
   const cfg = parseCli()
 
-  console.log(`sync-upstream.ts — phase 3 (health + fetch + merge chain + resume)`)
+  console.log(`sync-upstream.ts — phase 4 (health + fetch + merge chain + typecheck + PR)`)
   console.log(`  base-branch: ${cfg.baseBranch}`)
   console.log(`  dry-run:     ${cfg.dryRun}`)
 
@@ -702,7 +839,7 @@ async function main(): Promise<void> {
   }
 
   if (cfg.dryRun) {
-    console.log("\n--dry-run: skipping fetch + merge chain steps")
+    console.log("\n--dry-run: skipping fetch + merge chain + typecheck + PR steps")
     return
   }
 
@@ -733,8 +870,30 @@ async function main(): Promise<void> {
   }
   okLine(`${syncResult.step}: ${syncResult.message}`)
 
-  console.log("\n✓ phase 3 complete: health checks, fetch, merge chain, resume logic done")
-  console.log(`  next: phase 4 (typecheck gate + PR creation) → phase 5 (playbook)`)
+  // ----- Phase 4: typecheck gate + push + PR creation (FR7, FR8, AC4, AC6) -----
+
+  // FR8/AC6 — typecheck must pass before any push/PR creation.
+  const typecheckResult = await stepTypecheck()
+  if (typecheckResult.status === "failed") {
+    failLine(`${typecheckResult.step}: ${typecheckResult.message}`)
+    // Leave the sync branch in place for the human to inspect. Restore the
+    // original branch so the repo is not left on the sync branch unexpectedly.
+    await checkoutBranch(originalBranch).catch(() => {})
+    abort(typecheckResult.message)
+  }
+  okLine(`${typecheckResult.step}: ${typecheckResult.message}`)
+
+  // FR7/AC4 — push sync branch + create PR targeting the base branch.
+  const prResult = await stepPushAndCreatePR(cfg)
+  if (prResult.status === "failed") {
+    failLine(`${prResult.step}: ${prResult.message}`)
+    await checkoutBranch(originalBranch).catch(() => {})
+    abort(prResult.message)
+  }
+  okLine(`${prResult.step}: ${prResult.message}`)
+
+  console.log("\n✓ phase 4 complete: typecheck passed, sync branch pushed, PR created")
+  console.log(`  next: phase 5 (agent playbook)`)
 }
 
 main().catch((err) => {
