@@ -3,20 +3,26 @@
  * sync-upstream.ts — Agent-executable upstream sync script.
  *
  * Phase 1: pre-sync health checks + fetch skeleton (FR1, FR2, AC1).
- * Phase 2 (this implementation): merge chain — dev ← upstream/dev ff-only merge +
- *   push, sync branch creation from sinh-x-dev, dev → sync branch merge with
- *   conflict detection and pause-and-report (FR3, FR4, FR5, NFR2, AC2, AC3).
- *   - Argument parsing (node:util parseArgs, Bun built-ins only — NFR4)
- *   - Health checks: tools, gh auth, remotes, refs, worktree clean, correct branch (FR1)
- *   - Fetch origin and upstream remotes (FR2)
- *   - Merge chain: ff-only merge upstream/dev into dev, push origin/dev, create
- *     sync/upstream-YYYY-MM-DD from sinh-x-dev, merge dev into sync branch,
- *     detect conflicts and halt with file list + resolution instructions (FR3-FR5)
+ * Phase 2: merge chain — dev ← upstream/dev ff-only merge + push, sync branch
+ *   creation from sinh-x-dev, dev → sync branch merge with conflict detection
+ *   and pause-and-report (FR3, FR4, FR5, NFR2, AC2, AC3).
+ * Phase 3 (this implementation): resume + conflict-handling enhancements.
+ *   - State detection via git ref comparison (FR6, AC5): idempotent, no state
+ *     file to manage, survives interruption. Detects which steps are already
+ *     complete by comparing rev-parses and branch existence.
+ *   - Resume logic: skip completed steps (dev already at upstream/dev, sync
+ *     branch already exists, dev already merged in) and continue from the
+ *     next unfinished step (FR6, AC5).
+ *   - Conflict report enhanced: lists conflicting files, prints resolution
+ *     instructions, notes that re-running resumes from the next step, and
+ *     exits with code 2 (FR5, AC3).
+ *   - Clean abort on conflict: `git merge --abort` restores the worktree when
+ *     the conflict is detected before any partial commit (NFR2).
  *
- * Later phases (resume/state-tracking, typecheck gate, PR creation, playbook) are
- * intentionally NOT implemented here. This file is the skeleton those phases extend.
+ * Later phases (typecheck gate, PR creation, playbook) are intentionally NOT
+ * implemented here. This file is the skeleton those phases extend.
  *
- * Traceability: FR1-FR5, NFR1-NFR4, AC1-AC3.
+ * Traceability: FR1-FR6, NFR1-NFR4, AC1-AC3, AC5.
  */
 
 import { $ } from "bun"
@@ -248,12 +254,31 @@ async function checkBranch(cfg: SyncConfig): Promise<CheckResult> {
   const start = Date.now()
   const branch = await currentBranch()
   const ok = branch === cfg.baseBranch
+  // Resume tolerance (FR6/AC5): if we are NOT on the base branch but ARE on
+  // today's sync branch AND that sync branch already has dev merged (i.e. the
+  // human just committed a conflict resolution), the run is resumable — we
+  // should not fail the "correct-branch" precondition in that case. The merge
+  // chain steps will skip themselves because the work is already done.
+  let message: string
+  if (ok) {
+    message = `on ${cfg.baseBranch}`
+  } else if (branch === syncBranchName() && (await syncBranchStepAlreadyDone(cfg))) {
+    // Resume case: on today's sync branch with the merge already committed.
+    // Treat as OK so the rest of the run can proceed (all merge-chain steps
+    // will skip via their own resume predicates).
+    return {
+      name: "correct-branch",
+      ok: true,
+      message: `on ${branch} (resume: sync branch already has dev merged)`,
+      durationMs: Date.now() - start,
+    }
+  } else {
+    message = `expected ${cfg.baseBranch}, found ${branch}`
+  }
   return {
     name: "correct-branch",
     ok,
-    message: ok
-      ? `on ${cfg.baseBranch}`
-      : `expected ${cfg.baseBranch}, found ${branch}`,
+    message,
     durationMs: Date.now() - start,
   }
 }
@@ -316,6 +341,77 @@ async function abortMerge(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// State detection (Phase 3 — FR6, AC5)
+//
+// Resume logic uses git ref comparison instead of a step-marker file. This is
+// idempotent, survives repo relocation, and needs no .opencode/ state file (no
+// .gitignore churn). Each "is step X done?" predicate is a single rev-parse or
+// branch-list call.
+// ---------------------------------------------------------------------------
+
+/** Rev-parse a ref to a SHA. Returns null if the ref does not resolve. */
+async function revParse(ref: string): Promise<string | null> {
+  try {
+    const out = await $`git rev-parse --verify --quiet ${ref}`.quiet().text()
+    const sha = out.trim()
+    return sha.length > 0 ? sha : null
+  } catch {
+    return null
+  }
+}
+
+/** True if a local branch named `branch` exists. */
+async function localBranchExists(branch: string): Promise<boolean> {
+  try {
+    await $`git rev-parse --verify --quiet refs/heads/${branch}`.quiet()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * FR3 step is "done" when local `dev` already matches `upstream/dev` HEAD and
+ * `origin/dev` reflects that same SHA. Re-running the script after FR3 completed
+ * (or after a manual conflict resolution that finished the dev merge) skips
+ * the ff-only merge + push.
+ */
+async function devStepAlreadyDone(cfg: SyncConfig): Promise<boolean> {
+  const localDev = await revParse("refs/heads/dev")
+  const upstreamDev = await revParse(cfg.refs.upstreamDev)
+  const originDev = await revParse(cfg.refs.originDev)
+  if (!localDev || !upstreamDev) return false
+  if (localDev !== upstreamDev) return false
+  // origin/dev may lag behind upstream/dev if a prior push was interrupted
+  // before completion — treat that as "not done" so we re-attempt the push.
+  return originDev === localDev
+}
+
+/**
+ * FR4 sync-branch step is "done" for today's branch when the branch already
+ * exists locally AND dev has already been merged into it (sync branch HEAD is
+ * a descendant of dev HEAD, i.e. dev is an ancestor of the sync branch HEAD).
+ *
+ * This covers both the clean-merge case and the human-resolved-and-committed
+ * case: once the merge commit exists on the sync branch, dev is reachable from
+ * it and this predicate returns true.
+ */
+async function syncBranchStepAlreadyDone(cfg: SyncConfig): Promise<boolean> {
+  const branch = syncBranchName()
+  if (!(await localBranchExists(branch))) return false
+  const syncHead = await revParse(`refs/heads/${branch}`)
+  const devHead = await revParse("refs/heads/dev")
+  if (!syncHead || !devHead) return false
+  // sync branch is "done merging dev" if dev is reachable from it.
+  try {
+    await $`git merge-base --is-ancestor ${devHead} ${syncHead}`.quiet()
+    return true
+  } catch {
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Merge-chain steps (Phase 2: FR3, FR4, FR5, NFR2, AC2, AC3)
 // ---------------------------------------------------------------------------
 
@@ -325,11 +421,24 @@ async function abortMerge(): Promise<void> {
  * Pre: repo is on `cfg.baseBranch`, worktree clean, remotes fetched.
  * Post: local `dev` == upstream/dev and origin/dev reflects that, OR script halts.
  *
+ * Resume (FR6/AC5): if `devStepAlreadyDone` is true this step is skipped — no
+ * duplicate merge, no redundant push. The function reports "skipped" via the
+ * returned StepResult so the caller can log it distinctly.
+ *
  * Safety (NFR2): on any failure we restore the original branch and abort any
  * in-progress merge before reporting.
  */
 async function stepMergeDevFromUpstream(cfg: SyncConfig, originalBranch: string): Promise<StepResult> {
   using _ = group("FR3 — ff-merge upstream/dev into dev, push origin/dev")
+  // FR6/AC5: skip if already complete.
+  if (await devStepAlreadyDone(cfg)) {
+    okLine("dev already at upstream/dev and pushed — skipping (resume)")
+    return {
+      step: "merge-dev-from-upstream",
+      status: "completed",
+      message: "skipped: dev already at upstream/dev and pushed",
+    }
+  }
   try {
     await checkoutBranch("dev")
     okLine("checked out dev")
@@ -361,20 +470,55 @@ async function stepMergeDevFromUpstream(cfg: SyncConfig, originalBranch: string)
  * Post: sync branch exists and contains the merged dev, OR script halts with the
  * conflict list (FR5/AC3) — leaving the merge in place for human resolution.
  *
+ * Resume (FR6/AC5):
+ *   - If the sync branch already exists and dev is an ancestor of it (i.e. the
+ *     human already resolved any conflicts and committed the merge), the whole
+ *     step is skipped — the script proceeds to the next phase.
+ *   - If the sync branch already exists but dev is NOT yet an ancestor (the
+ *     merge was never started, or was aborted), we check it out and merge dev
+ *     into it. This covers the case where a prior run created the branch but
+ *     was interrupted before `git merge dev` ran.
+ *
  * Conflict handling (FR5/AC3): when `git merge` reports conflicts we DO NOT abort
- * the merge. The human resolves them in-tree, then re-runs the script (Phase 3 will
- * add resume logic; Phase 2 only detects and reports). The script exits with a
- * dedicated conflict code (2) and prints the conflicting file list.
+ * the merge. The human resolves them in-tree, commits the merge, then re-runs the
+ * script. The script exits with a dedicated conflict code (2) and prints the
+ * conflicting file list plus resolution instructions. Re-running after the
+ * human commits: the worktree is clean, `syncBranchStepAlreadyDone` returns
+ * true, and the script skips FR4 and continues to the next phase (FR6/AC5).
+ *
+ * Note on the worktree-clean precondition (FR1): the human MUST commit their
+ * conflict resolution before re-running. A staged-but-uncommitted resolution
+ * leaves the worktree dirty, which the health check (correctly) rejects. This
+ * preserves FR1's invariant and keeps the resume path simple.
  */
 async function stepCreateAndMergeSyncBranch(cfg: SyncConfig): Promise<StepResult> {
   using _ = group("FR4 — create sync branch, merge dev")
   const branch = syncBranchName()
-  try {
-    await checkoutBranch(cfg.baseBranch)
-    okLine(`checked out ${cfg.baseBranch}`)
 
-    await createSyncBranch(branch, cfg.baseBranch)
-    okLine(`created ${branch} from ${cfg.baseBranch}`)
+  // FR6/AC5 — already fully complete? (human committed a prior conflict resolution)
+  if (await syncBranchStepAlreadyDone(cfg)) {
+    okLine(`${branch} already exists with dev merged — skipping (resume)`)
+    return {
+      step: "create-and-merge-sync-branch",
+      status: "completed",
+      message: `skipped: sync branch ${branch} already has dev merged`,
+    }
+  }
+
+  // Fresh-run or resume-after-abort case. The branch may or may not exist yet:
+  //   - does not exist → create it from cfg.baseBranch
+  //   - exists but dev not merged → check it out and merge dev (e.g. a prior
+  //     run created the branch but was interrupted before `git merge dev`)
+  try {
+    if (await localBranchExists(branch)) {
+      okLine(`sync branch ${branch} already exists — checking out and merging dev`)
+      await checkoutBranch(branch)
+    } else {
+      await checkoutBranch(cfg.baseBranch)
+      okLine(`checked out ${cfg.baseBranch}`)
+      await createSyncBranch(branch, cfg.baseBranch)
+      okLine(`created ${branch} from ${cfg.baseBranch}`)
+    }
 
     okLine(`merging dev into ${branch}…`)
     try {
@@ -416,6 +560,10 @@ async function stepCreateAndMergeSyncBranch(cfg: SyncConfig): Promise<StepResult
 /**
  * Print a conflict report (FR5/AC3) and exit with code 2 so PA agents can detect
  * "halt for human resolution" distinctly from a generic failure.
+ *
+ * Phase 3 enhancement: the instructions now explicitly state that re-running the
+ * script after the human commits the merge will skip the completed steps and
+ * resume from the next phase (FR6/AC5) — no manual state cleanup required.
  */
 function reportConflictsAndHalt(result: StepResult): never {
   console.error(`\n✗ MERGE CONFLICTS DETECTED — human resolution required`)
@@ -426,12 +574,15 @@ function reportConflictsAndHalt(result: StepResult): never {
   for (const f of files) {
     console.error(`    • ${f}`)
   }
-  console.error(`\nTo resolve:`)
+  console.error(`\nTo resolve and resume:`)
   console.error(`  1. Edit each conflicted file above, choose the correct hunks.`)
   console.error(`  2. \`git add <file>\` for each resolved file.`)
-  console.error(`  3. \`git commit\` to complete the merge.`)
-  console.error(`  4. Re-run this script to resume from the next step.`)
-  console.error(`  (Phase 3 will add automatic resume; Phase 2 reports and halts.)`)
+  console.error(`  3. \`git commit --no-edit\` to complete the merge.`)
+  console.error(`  4. Re-run this script. It will detect that the sync branch now`)
+  console.error(`     has dev merged, skip this step (resume), and continue to the`)
+  console.error(`     next phase. No state cleanup needed. (FR6/AC5)`)
+  console.error(`\n  To abort instead: \`git merge --abort\` then re-run from scratch.`)
+  console.error(`\nExit code 2 = conflicts need resolution (FR5/AC3).`)
   process.exit(2)
 }
 
@@ -458,13 +609,23 @@ Merge chain (FR3-FR5) runs after fetch:
   - create sync/upstream-YYYY-MM-DD from <base-branch>   (FR4)
   - merge dev into the sync branch; halt on conflict      (FR4/FR5)
 
+Resume (FR6/AC5 — Phase 3):
+  Re-running the script after a halt (conflict, interrupt, or failure) detects
+  completed steps via git ref comparison and skips them:
+  - dev already at upstream/dev HEAD and pushed → skip FR3
+  - sync/upstream-YYYY-MM-DD already exists with dev merged → skip FR4
+
+  Conflict resolution path: when the merge halts with conflicts, the human
+  resolves the files, commits the merge (\`git commit --no-edit\`), then re-runs
+  the script. The worktree must be clean before re-run (FR1 precondition).
+
 Exit codes:
   0   success (health + fetch + merge chain all complete, or --dry-run checks pass)
   1   a health check, fetch, or merge step failed
   2   merge conflicts detected — human resolution required (FR5/AC3)
 
-Phase 1+2 scope: health checks, fetch, and merge chain. Resume logic, typecheck
-gate, PR creation, and agent playbook arrive in later phases.`)
+Phase 1+2+3 scope: health checks, fetch, merge chain, resume + conflict
+handling. Typecheck gate, PR creation, and agent playbook arrive in later phases.`)
 }
 
 function parseCli(): SyncConfig {
@@ -504,7 +665,7 @@ function parseCli(): SyncConfig {
 async function main(): Promise<void> {
   const cfg = parseCli()
 
-  console.log(`sync-upstream.ts — phase 2 (health + fetch + merge chain)`)
+  console.log(`sync-upstream.ts — phase 3 (health + fetch + merge chain + resume)`)
   console.log(`  base-branch: ${cfg.baseBranch}`)
   console.log(`  dry-run:     ${cfg.dryRun}`)
 
@@ -572,8 +733,8 @@ async function main(): Promise<void> {
   }
   okLine(`${syncResult.step}: ${syncResult.message}`)
 
-  console.log("\n✓ phase 2 complete: health checks, fetch, and merge chain done")
-  console.log(`  next: phase 3 (resume logic) → phase 4 (typecheck + PR) → phase 5 (playbook)`)
+  console.log("\n✓ phase 3 complete: health checks, fetch, merge chain, resume logic done")
+  console.log(`  next: phase 4 (typecheck gate + PR creation) → phase 5 (playbook)`)
 }
 
 main().catch((err) => {
