@@ -378,7 +378,9 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
         yield* InstanceState.get(state).pipe(Effect.forkIn(scope))
       }),
       branch: Effect.fn("Vcs.branch")(function* () {
-        return yield* InstanceState.use(state, (x) => x.current)
+        const ctx = yield* InstanceState.context
+        if (ctx.project.vcs !== "git") return
+        return yield* git.branch(ctx.directory)
       }),
       defaultBranch: Effect.fn("Vcs.defaultBranch")(function* () {
         return yield* InstanceState.use(state, (x) => x.root?.name)
