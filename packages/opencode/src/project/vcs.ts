@@ -378,7 +378,9 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
         yield* InstanceState.get(state).pipe(Effect.forkIn(scope))
       }),
       branch: Effect.fn("Vcs.branch")(function* () {
-        return yield* InstanceState.use(state, (x) => x.current)
+        const ctx = yield* InstanceState.context
+        if (ctx.project.vcs !== "git") return
+        return yield* git.branch(ctx.directory)
       }),
       defaultBranch: Effect.fn("Vcs.defaultBranch")(function* () {
         return yield* InstanceState.use(state, (x) => x.root?.name)
@@ -417,7 +419,8 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
         }
 
         if (!value.root) return []
-        if (value.current && value.current === value.root.name) return []
+        const current = yield* git.branch(ctx.directory)
+        if (current && current === value.root.name) return []
         const ref = yield* git.mergeBase(ctx.directory, value.root.ref)
         if (!ref) return []
         return yield* diffAgainstRef(git, ctx.directory, ref, options)
@@ -437,12 +440,13 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
         }
 
         const refs = yield* git.refs(ctx.directory)
+        const current = yield* git.branch(ctx.directory)
         const defaultRef = value.root?.ref
         const fallback = refs.includes("develop") ? "develop" : refs.includes("origin/develop") ? "origin/develop" : undefined
         const resolved = resolveRef(refs, selectedRef, defaultRef, fallback)
-        if (!resolved || !value.current) {
+        if (!resolved || !current) {
           return {
-            active_branch: value.current,
+            active_branch: current,
             selected_ref: resolved,
             available_refs: refs,
             commit_total: 0,
@@ -451,10 +455,10 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
           }
         }
 
-        const ref = yield* git.mergeBase(ctx.directory, resolved, value.current)
+        const ref = yield* git.mergeBase(ctx.directory, resolved, current)
         if (!ref) {
           return {
-            active_branch: value.current,
+            active_branch: current,
             selected_ref: resolved,
             available_refs: refs,
             commit_total: 0,
@@ -464,11 +468,11 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
         }
 
         const [commits, diff] = yield* Effect.all(
-          [git.commitSummary(ctx.directory, ref, value.current, 10), git.diffSummary(ctx.directory, ref, 20)],
+          [git.commitSummary(ctx.directory, ref, current, 10), git.diffSummary(ctx.directory, ref, 20)],
           { concurrency: 2 },
         )
         return {
-          active_branch: value.current,
+          active_branch: current,
           selected_ref: resolved,
           available_refs: refs,
           commit_total: commits.total,
