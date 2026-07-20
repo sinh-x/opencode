@@ -70,18 +70,23 @@ interface StepResult {
   conflictingFiles?: string[]
 }
 
-/** YYYY-MM-DD in local time — used for the sync branch name (FR4). */
-function todayStamp(): string {
-  const d = new Date()
-  const yyyy = d.getFullYear()
-  const mm = String(d.getMonth() + 1).padStart(2, "0")
-  const dd = String(d.getDate()).padStart(2, "0")
+/**
+ * YYYY-MM-DD in local time — used for the sync branch name (FR4).
+ *
+ * CQ-1: accepts an optional `now` Date for unit-test injection. When omitted,
+ * uses `new Date()`. This keeps the production path byte-identical while making
+ * the date formatting pure and testable with known inputs.
+ */
+export function todayStamp(now: Date = new Date()): string {
+  const yyyy = now.getFullYear()
+  const mm = String(now.getMonth() + 1).padStart(2, "0")
+  const dd = String(now.getDate()).padStart(2, "0")
   return `${yyyy}-${mm}-${dd}`
 }
 
-/** Sync branch name per FR4: `sync/upstream-YYYY-MM-DD`. */
-function syncBranchName(): string {
-  return `sync/upstream-${todayStamp()}`
+/** Sync branch name per FR4: `sync/upstream-YYYY-MM-DD`. CQ-1: optional `now` for tests. */
+export function syncBranchName(now: Date = new Date()): string {
+  return `sync/upstream-${todayStamp(now)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +164,7 @@ async function refExists(ref: string): Promise<boolean> {
   }
 }
 
-function toolPath(name: string): string | null {
+export function toolPath(name: string): string | null {
   // Bun.which is a pure-Bun lookup (no shell) — satisfies NFR4 (no new deps).
   return Bun.which(name)
 }
@@ -173,11 +178,26 @@ function toolPath(name: string): string | null {
  *
  * Returns an object with `authed` (authentication works) and `hasRepoScope`
  * (the token can actually create PRs in this repo).
+ *
+ * CQ-1: accepts an optional `shell` function for unit-test injection. When
+ * omitted, uses the real Bun `$` template tag. The shell function receives
+ * the command array (e.g. `["gh","auth","status"]`) and returns a string of
+ * stdout, or throws to simulate a non-zero exit. This keeps the production
+ * path byte-identical while making the pure logic testable.
  */
-async function ghRepoScopeStatus(): Promise<{ authed: boolean; hasRepoScope: boolean; detail: string }> {
+export type GhShell = (cmd: string[]) => Promise<string>
+
+const defaultGhShell: GhShell = async (cmd) => {
+  // Rebuild a `$` call from the cmd array. We use Bun's template tag with
+  // interpolated args so each element is passed safely (no shell injection).
+  const [bin, ...args] = cmd
+  return await $`${[bin, ...args] as string[]}`.quiet().text()
+}
+
+export async function ghRepoScopeStatus(shell: GhShell = defaultGhShell): Promise<{ authed: boolean; hasRepoScope: boolean; detail: string }> {
   // First: must be authenticated at all.
   try {
-    await $`gh auth status`.quiet()
+    await shell(["gh", "auth", "status"])
   } catch {
     return { authed: false, hasRepoScope: false, detail: "gh auth status failed — run `gh auth login`" }
   }
@@ -186,7 +206,7 @@ async function ghRepoScopeStatus(): Promise<{ authed: boolean; hasRepoScope: boo
   // GitHub Actions the GITHUB_TOKEN does not have `gh auth status` info, so
   // fall back to the canary below.
   try {
-    const out = await $`gh auth status --show-token`.quiet().text()
+    const out = await shell(["gh", "auth", "status", "--show-token"])
     const scopeMatch = out.match(/scopes?:\s*([^\n]*)/i)
     if (scopeMatch) {
       const scopes = scopeMatch[1].split(",").map((s) => s.trim().toLowerCase())
@@ -204,7 +224,7 @@ async function ghRepoScopeStatus(): Promise<{ authed: boolean; hasRepoScope: boo
   // Fallback canary: try a read-only `gh pr list --limit 1` which requires
   // repo access. If it fails, the token cannot reach this repo's PRs.
   try {
-    await $`gh pr list --limit 1`.quiet()
+    await shell(["gh", "pr", "list", "--limit", "1"])
     return { authed: true, hasRepoScope: true, detail: "gh authenticated (repo access verified via gh pr list canary)" }
   } catch {
     return {
@@ -219,11 +239,19 @@ async function ghRepoScopeStatus(): Promise<{ authed: boolean; hasRepoScope: boo
 // Health checks (FR1). Each returns a CheckResult; main() aborts on first failure.
 // ---------------------------------------------------------------------------
 
-async function checkTools(): Promise<CheckResult> {
+export type WhichFn = (name: string) => string | null
+
+/**
+ * CQ-1: accepts an optional `which` function for unit-test injection. When
+ * omitted, uses the real `toolPath` (which calls `Bun.which`). This keeps the
+ * production path byte-identical while making the pure logic testable without
+ * spawning subprocesses or relying on the host's PATH.
+ */
+export async function checkTools(which: WhichFn = toolPath): Promise<CheckResult> {
   const start = Date.now()
   const missing: string[] = []
   for (const tool of ["git", "gh", "bun"]) {
-    if (!toolPath(tool)) missing.push(tool)
+    if (!which(tool)) missing.push(tool)
   }
   return {
     name: "tools-available",
@@ -840,7 +868,7 @@ playbook) arrives in a later phase.`)
 /** Safe-branch-name pattern (SQ-1): reject shell-significant characters. */
 const SAFE_BRANCH_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._/-]+$/
 
-function isValidBranchName(name: string): boolean {
+export function isValidBranchName(name: string): boolean {
   return SAFE_BRANCH_NAME.test(name)
 }
 
@@ -1002,9 +1030,13 @@ async function main(): Promise<void> {
   console.log(`  next: phase 5 (agent playbook)`)
 }
 
-main().catch((err) => {
-  // Bun.$ throws an exit-code-bearing error on non-zero shell exit. Surface it.
-  const msg = err instanceof Error ? err.message : String(err)
-  console.error(`\n✗ unexpected error: ${msg}`)
-  process.exit(1)
-})
+// CQ-1: only run main() when executed directly (not when imported by tests).
+// `import.meta.main` is true for the entry script, false for imported modules.
+if (import.meta.main) {
+  main().catch((err) => {
+    // Bun.$ throws an exit-code-bearing error on non-zero shell exit. Surface it.
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`\n✗ unexpected error: ${msg}`)
+    process.exit(1)
+  })
+}
