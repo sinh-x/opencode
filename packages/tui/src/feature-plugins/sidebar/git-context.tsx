@@ -3,7 +3,7 @@ import type { BuiltinTuiPlugin } from "../builtins"
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 
 const id = "git-context"
-const kvRefKey = "sidebar_git_selected_ref"
+const kvRefPrefix = "sidebar_git_selected_ref"
 const envKeys = ["PA_DEPLOYMENT_ID", "PA_MODE", "PA_TEAM", "PA_TICKET_ID", "PA_PROVIDER", "PA_MODEL"] as const
 const secretPattern = /(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)/i
 
@@ -36,6 +36,14 @@ export function sidebarSelectedRef(summary: VcsBranchSummary | undefined, stored
   return summary.selected_ref
 }
 
+export function buildKvRefKey(prefix: string, directory: string): string {
+  return `${prefix}:${directory}`
+}
+
+export function createChangeTextHandlers(onOpen: () => void): { onMouseUp: () => void } {
+  return { onMouseUp: onOpen }
+}
+
 export function reduceFetchSettled(
   isCurrent: boolean,
   error: unknown,
@@ -53,7 +61,8 @@ function View(props: { api: TuiPluginApi }) {
   const [stale, setStale] = createSignal(false)
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
   const env = createMemo(() => sidebarLaunchEnv())
-  const selectedRef = createMemo(() => props.api.kv.get<string | undefined>(kvRefKey, undefined))
+  const kvRefKey = createMemo(() => buildKvRefKey(kvRefPrefix, props.api.state.path.directory))
+  const selectedRef = createMemo(() => props.api.kv.get<string | undefined>(kvRefKey(), undefined))
   let reqId = 0
 
   const refresh = () => {
@@ -109,7 +118,7 @@ function View(props: { api: TuiPluginApi }) {
         current={effectiveRef()}
         options={options}
         onSelect={(item) => {
-          props.api.kv.set(kvRefKey, item.value)
+          props.api.kv.set(kvRefKey(), item.value)
           props.api.ui.dialog.clear()
         }}
       />
@@ -159,7 +168,7 @@ function View(props: { api: TuiPluginApi }) {
                   <span style={{ fg: theme().info }}>{effectiveRef()}</span>
                 </text>
                 <Show when={availableRefs().length > 0}>
-                  <text fg={theme().warning} onMouseDown={openRefSelector}>[change]</text>
+                  <text fg={theme().warning} {...createChangeTextHandlers(openRefSelector)}>[change]</text>
                 </Show>
               </box>
               <text>

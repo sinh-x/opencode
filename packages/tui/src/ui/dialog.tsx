@@ -8,6 +8,29 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { useBindings, useOpencodeModeStack } from "../keymap"
 import { useClipboard } from "../context/clipboard"
 
+export function createBackdropDismissGuard(hasSelection: () => boolean) {
+  let dismiss = false
+  let receivedMouseDown = false
+  return {
+    onMouseDown() {
+      receivedMouseDown = true
+      dismiss = hasSelection()
+    },
+    onMouseUp(): boolean {
+      if (!receivedMouseDown) return true
+      receivedMouseDown = false
+      if (dismiss) {
+        dismiss = false
+        return true
+      }
+      return false
+    },
+    suppressDismiss() {
+      dismiss = false
+    },
+  }
+}
+
 export function Dialog(
   props: ParentProps<{
     size?: "medium" | "large" | "xlarge"
@@ -18,7 +41,7 @@ export function Dialog(
   const { theme } = useTheme()
   const renderer = useRenderer()
 
-  let dismiss = false
+  const guard = createBackdropDismissGuard(() => !!renderer.getSelection())
   const width = () => {
     if (props.size === "xlarge") return 116
     if (props.size === "large") return 88
@@ -27,14 +50,9 @@ export function Dialog(
 
   return (
     <box
-      onMouseDown={() => {
-        dismiss = !!renderer.getSelection()
-      }}
+      onMouseDown={guard.onMouseDown}
       onMouseUp={() => {
-        if (dismiss) {
-          dismiss = false
-          return
-        }
+        if (guard.onMouseUp()) return
         props.onClose?.()
       }}
       width={dimensions().width}
@@ -52,7 +70,7 @@ export function Dialog(
           // A selection release must bubble up to the copy-on-select handler in
           // DialogProvider; the backdrop's dismiss flag keeps it from closing the dialog.
           if (renderer.getSelection()?.getSelectedText()) return
-          dismiss = false
+          guard.suppressDismiss()
           e.stopPropagation()
         }}
         width={width()}
