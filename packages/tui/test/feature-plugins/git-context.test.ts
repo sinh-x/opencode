@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
+  buildKvRefKey,
+  createChangeTextHandlers,
   reduceFetchSettled,
   sidebarLaunchEnv,
   sidebarSelectedRef,
@@ -168,6 +170,62 @@ describe("git-context utilities", () => {
     test("marks stale with undefined summary when current error has no previous", () => {
       const result = reduceFetchSettled(true, new Error("boom"), undefined, undefined)
       expect(result).toEqual({ stale: true, summary: undefined })
+    })
+  })
+
+  describe("buildKvRefKey", () => {
+    test("produces per-directory key from prefix:directory", () => {
+      expect(buildKvRefKey("sidebar_git_selected_ref", "/home/sinh/repo-a")).toBe(
+        "sidebar_git_selected_ref:/home/sinh/repo-a",
+      )
+    })
+
+    test("produces distinct keys for different directories", () => {
+      const a = buildKvRefKey("sidebar_git_selected_ref", "/home/sinh/repo-a")
+      const b = buildKvRefKey("sidebar_git_selected_ref", "/home/sinh/repo-b")
+      expect(a).not.toBe(b)
+      expect(a.endsWith(":/home/sinh/repo-a")).toBe(true)
+      expect(b.endsWith(":/home/sinh/repo-b")).toBe(true)
+    })
+
+    test("preserves directory paths with special characters", () => {
+      expect(buildKvRefKey("prefix", "/path with spaces/and-dashes")).toBe(
+        "prefix:/path with spaces/and-dashes",
+      )
+    })
+
+    test("produces empty-directory key when directory is empty string", () => {
+      expect(buildKvRefKey("prefix", "")).toBe("prefix:")
+    })
+
+    test("respects a different prefix", () => {
+      expect(buildKvRefKey("other_prefix", "/dir")).toBe("other_prefix:/dir")
+    })
+  })
+
+  describe("createChangeTextHandlers", () => {
+    test("exposes onMouseUp that invokes the open callback", () => {
+      let opened = 0
+      const handlers = createChangeTextHandlers(() => { opened++ })
+      expect(typeof handlers.onMouseUp).toBe("function")
+      handlers.onMouseUp()
+      expect(opened).toBe(1)
+    })
+
+    test("onMouseUp calls openRefSelector each invocation", () => {
+      let opened = 0
+      const handlers = createChangeTextHandlers(() => { opened++ })
+      handlers.onMouseUp()
+      handlers.onMouseUp()
+      handlers.onMouseUp()
+      expect(opened).toBe(3)
+    })
+
+    test("handler is bound to the supplied callback identity (no default behavior)", () => {
+      const calls: string[] = []
+      const handlers = createChangeTextHandlers(() => { calls.push("open") })
+      handlers.onMouseUp()
+      expect(calls).toEqual(["open"])
     })
   })
 })

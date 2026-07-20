@@ -36,6 +36,14 @@ export function sidebarSelectedRef(summary: VcsBranchSummary | undefined, stored
   return summary.selected_ref
 }
 
+export function buildKvRefKey(prefix: string, directory: string): string {
+  return `${prefix}:${directory}`
+}
+
+export function createChangeTextHandlers(onOpen: () => void): { onMouseUp: () => void } {
+  return { onMouseUp: onOpen }
+}
+
 export function reduceFetchSettled(
   isCurrent: boolean,
   error: unknown,
@@ -53,7 +61,7 @@ function View(props: { api: TuiPluginApi }) {
   const [stale, setStale] = createSignal(false)
   const [summary, setSummary] = createSignal<VcsBranchSummary>()
   const env = createMemo(() => sidebarLaunchEnv())
-  const kvRefKey = createMemo(() => `${kvRefPrefix}:${props.api.state.path.directory}`)
+  const kvRefKey = createMemo(() => buildKvRefKey(kvRefPrefix, props.api.state.path.directory))
   const selectedRef = createMemo(() => props.api.kv.get<string | undefined>(kvRefKey(), undefined))
   let reqId = 0
 
@@ -160,7 +168,7 @@ function View(props: { api: TuiPluginApi }) {
                   <span style={{ fg: theme().info }}>{effectiveRef()}</span>
                 </text>
                 <Show when={availableRefs().length > 0}>
-                  <text fg={theme().warning} onMouseUp={openRefSelector}>[change]</text>
+                  <text fg={theme().warning} {...createChangeTextHandlers(openRefSelector)}>[change]</text>
                 </Show>
               </box>
               <text>
