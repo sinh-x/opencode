@@ -209,7 +209,7 @@ export async function ghRepoScopeStatus(shell: GhShell = defaultGhShell): Promis
     const out = await shell(["gh", "auth", "status", "--show-token"])
     const scopeMatch = out.match(/scopes?:\s*([^\n]*)/i)
     if (scopeMatch) {
-      const scopes = scopeMatch[1].split(",").map((s) => s.trim().toLowerCase())
+      const scopes = scopeMatch[1].split(",").map((s) => s.trim().replace(/^'|'$/g, "").toLowerCase())
       const hasRepo = scopes.includes("repo") || scopes.includes("admin:repo_all")
       if (hasRepo) return { authed: true, hasRepoScope: true, detail: "gh authenticated with repo scope" }
       return {
