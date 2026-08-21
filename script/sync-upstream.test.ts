@@ -37,6 +37,7 @@ import {
   stepReleaseMerge,
   stepReleasePushAndPR,
   validatePRMetadata,
+  formatVerificationGateLine,
   type WhichFn,
   type GhShell,
   type LsRemoteShell,
@@ -1334,6 +1335,67 @@ describe("CQ-2: production release push and PR orchestration", () => {
     expect(result.status).toBe("failed")
     expect(created).toBe(false)
   })
+
+  test("creates and reads back a PR with a skipped verification gate", async () => {
+    const skippedVerification = [{ label: "gate passed", ok: true, skipped: true }]
+    const skippedBody = validBody.replace("- [x] gate passed", "- [x] gate passed _(skipped via resume)_")
+    const calls: string[][] = []
+    const result = await stepReleasePushAndPR(rcfg, skippedVerification, {
+      gitShell: async (cmd) => {
+        calls.push(cmd)
+        return cmd[1] === "rev-parse" ? rcfg.expectedSourceSha : ""
+      },
+      prListShell: async (cmd) => {
+        calls.push(cmd)
+        return "[]"
+      },
+      prCreateShell: async (cmd) => {
+        calls.push(cmd)
+        return "https://github.com/sinh-x/opencode/pull/21\n"
+      },
+      prViewShell: async (cmd) => {
+        calls.push(cmd)
+        return JSON.stringify({ number: 21, url: "https://github.com/sinh-x/opencode/pull/21", baseRefName: rcfg.baseBranch, headRefName: rcfg.releaseBranch, headRefOid: rcfg.expectedSourceSha, body: skippedBody })
+      },
+      buildBody: async () => skippedBody,
+    })
+    expect(result.status).toBe("completed")
+    expect(calls.map((cmd) => cmd.slice(0, 3))).toEqual([
+      ["git", "push", "-u"],
+      ["git", "rev-parse", "HEAD"],
+      ["gh", "pr", "list"],
+      ["gh", "pr", "create"],
+      ["gh", "pr", "view"],
+    ])
+  })
+
+  test("surfaces and validates an existing PR with a skipped verification gate", async () => {
+    const skippedVerification = [{ label: "gate passed", ok: true, skipped: true }]
+    const skippedBody = validBody.replace("- [x] gate passed", "- [x] gate passed _(skipped via resume)_")
+    const calls: string[][] = []
+    const result = await stepReleasePushAndPR(rcfg, skippedVerification, {
+      gitShell: async (cmd) => {
+        calls.push(cmd)
+        return cmd[1] === "rev-parse" ? rcfg.expectedSourceSha : ""
+      },
+      prListShell: async (cmd) => {
+        calls.push(cmd)
+        return JSON.stringify([{ url: "https://github.com/sinh-x/opencode/pull/21", headRefOid: rcfg.expectedSourceSha, baseRefName: rcfg.baseBranch, headRefName: rcfg.releaseBranch }])
+      },
+      prViewShell: async (cmd) => {
+        calls.push(cmd)
+        return JSON.stringify({ number: 21, url: "https://github.com/sinh-x/opencode/pull/21", baseRefName: rcfg.baseBranch, headRefName: rcfg.releaseBranch, headRefOid: rcfg.expectedSourceSha, body: skippedBody })
+      },
+      prCreateShell: async () => { throw new Error("duplicate PR creation") },
+    })
+    expect(result.status).toBe("completed")
+    expect(calls.map((cmd) => cmd.slice(0, 3))).toEqual([
+      ["git", "push", "-u"],
+      ["git", "rev-parse", "HEAD"],
+      ["gh", "pr", "list"],
+      ["gh", "pr", "view"],
+    ])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1359,6 +1421,15 @@ describe("OPS-2R: validatePRMetadata — exact value validation", () => {
     { label: "`bun install --frozen-lockfile` passed", ok: true },
     { label: "`bun typecheck` passed", ok: true },
   ]
+
+  test.each([
+    [{ label: "passed", ok: true }, "- [x] passed"],
+    [{ label: "failed", ok: false }, "- [ ] failed"],
+    [{ label: "skipped-passed", ok: true, skipped: true }, "- [x] skipped-passed _(skipped via resume)_"],
+    [{ label: "skipped-failed", ok: false, skipped: true }, "- [ ] skipped-failed _(skipped via resume)_"],
+  ])("formats %o as %s", (item, expected) => {
+    expect(formatVerificationGateLine(item)).toBe(expected)
+  })
 
   function makeValidBody(): string {
     return [
@@ -1505,6 +1576,19 @@ describe("OPS-2R: validatePRMetadata — exact value validation", () => {
     const body = makeValidBody().replace(" It requires manual review and explicit merge approval after all gate evidence is verified.", "")
     const errors = validatePRMetadata({ ...validMeta, body }, rcfg, localHead, verification)
     expect(errors.some((e) => e.includes("complete no-auto-merge"))).toBe(true)
+  })
+
+  test("requires the exact resume suffix and checkbox state for skipped gates", () => {
+    const skipped = [{ label: "Pre-sync health checks passed", ok: true, skipped: true }]
+    const base = makeValidBody()
+    const missingSuffix = base
+    const malformedSuffix = base.replace("- [x] Pre-sync health checks passed", "- [x] Pre-sync health checks passed _(skipped)_")
+    const wrongState = base.replace("- [x] Pre-sync health checks passed", "- [ ] Pre-sync health checks passed _(skipped via resume)_")
+    const valid = base.replace("- [x] Pre-sync health checks passed", "- [x] Pre-sync health checks passed _(skipped via resume)_")
+    expect(validatePRMetadata({ ...validMeta, body: missingSuffix }, rcfg, localHead, skipped).some((e) => e.includes("verification gate outcome"))).toBe(true)
+    expect(validatePRMetadata({ ...validMeta, body: malformedSuffix }, rcfg, localHead, skipped).some((e) => e.includes("verification gate outcome"))).toBe(true)
+    expect(validatePRMetadata({ ...validMeta, body: wrongState }, rcfg, localHead, skipped).some((e) => e.includes("verification gate outcome"))).toBe(true)
+    expect(validatePRMetadata({ ...validMeta, body: valid }, rcfg, localHead, skipped).some((e) => e.includes("verification gate outcome"))).toBe(false)
   })
 })
 

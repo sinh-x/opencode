@@ -852,10 +852,16 @@ async function stepPushAndCreatePR(cfg: SyncConfig, steps: VerificationItem[]): 
  * that did not run (e.g. skipped via resume) are still reported as completed
  * with a `skipped: true` flag so the PR body reflects what actually happened.
  */
-interface VerificationItem {
+export interface VerificationItem {
   label: string
   ok: boolean
   skipped?: boolean
+}
+
+export function formatVerificationGateLine(item: VerificationItem): string {
+  const box = item.ok ? "[x]" : "[ ]"
+  const suffix = item.skipped ? " _(skipped via resume)_" : ""
+  return `- ${box} ${item.label}${suffix}`
 }
 
 /**
@@ -888,11 +894,7 @@ async function buildPRBody(cfg: SyncConfig, steps: VerificationItem[]): Promise<
   // happens, render it as an unchecked box so a reviewer sees it.
   const checklist = steps.length
     ? steps
-        .map((s) => {
-          const box = s.ok ? "[x]" : "[ ]"
-          const suffix = s.skipped ? " _(skipped via resume)_" : ""
-          return `- ${box} ${s.label}${suffix}`
-        })
+        .map(formatVerificationGateLine)
         .join("\n")
     : "- _(no step results recorded)_"
   return [
@@ -1334,11 +1336,7 @@ export async function stepReleasePushAndPR(
 async function buildReleasePRBody(rcfg: ReleaseConfig, steps: VerificationItem[]): Promise<string> {
   const checklist = steps.length
     ? steps
-        .map((s) => {
-          const box = s.ok ? "[x]" : "[ ]"
-          const suffix = s.skipped ? " _(skipped via resume)_" : ""
-          return `- ${box} ${s.label}${suffix}`
-        })
+        .map(formatVerificationGateLine)
         .join("\n")
     : "- _(no step results recorded)_"
   const targetMeta = rcfg.releaseTargetMetadata
@@ -1498,8 +1496,8 @@ export function validatePRMetadata(
     errors.push(`body does not contain the complete no-auto-merge statement`)
   }
   for (const item of verification) {
-    const box = item.ok ? "[x]" : "[ ]"
-    if (!body.split(/\r?\n/).includes(`- ${box} ${item.label}`)) {
+    const expectedLine = formatVerificationGateLine(item)
+    if (!body.split(/\r?\n/).includes(expectedLine)) {
       errors.push(`body does not contain verification gate outcome: ${item.label}`)
     }
   }
