@@ -22,8 +22,14 @@ import {
   isValidBranchName,
   checkTools,
   ghRepoScopeStatus,
+  isValidFullSha,
+  isValidReleaseTag,
+  releaseBranchName,
+  verifyReleaseSourceSha,
+  parseReleaseArgs,
   type WhichFn,
   type GhShell,
+  type ReleaseConfig,
 } from "./sync-upstream.ts"
 
 // ---------------------------------------------------------------------------
@@ -424,5 +430,227 @@ describe("ghRepoScopeStatus", () => {
     expect(typeof result.authed).toBe("boolean")
     expect(typeof result.hasRepoScope).toBe("boolean")
     expect(typeof result.detail).toBe("string")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isValidFullSha (release mode — NFR3)
+// ---------------------------------------------------------------------------
+
+describe("isValidFullSha", () => {
+  test("accepts a 40-character lowercase hex SHA", () => {
+    expect(isValidFullSha("2b72179c663cadcb54f54d9f19221b3fb3d11fb6")).toBe(true)
+  })
+
+  test("accepts all-zeros SHA", () => {
+    expect(isValidFullSha("0000000000000000000000000000000000000000")).toBe(true)
+  })
+
+  test("rejects an abbreviated SHA (7 chars)", () => {
+    expect(isValidFullSha("2b72179")).toBe(false)
+  })
+
+  test("rejects a 39-character SHA", () => {
+    expect(isValidFullSha("2b72179c663cadcb54f54d9f19221b3fb3d11fb")).toBe(false)
+  })
+
+  test("rejects a 41-character SHA", () => {
+    expect(isValidFullSha("2b72179c663cadcb54f54d9f19221b3fb3d11fb66")).toBe(false)
+  })
+
+  test("rejects uppercase hex SHA", () => {
+    expect(isValidFullSha("2B72179C663CADCB54F54D9F19221B3FB3D11FB6")).toBe(false)
+  })
+
+  test("rejects empty string", () => {
+    expect(isValidFullSha("")).toBe(false)
+  })
+
+  test("rejects a non-hex string of length 40", () => {
+    expect(isValidFullSha("gggggggggggggggggggggggggggggggggggggggg")).toBe(false)
+  })
+
+  test("rejects a SHA with spaces", () => {
+    expect(isValidFullSha("2b72179c663cadcb54f54d9f19221b3fb3d11fb ")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isValidReleaseTag (release mode — FR1)
+// ---------------------------------------------------------------------------
+
+describe("isValidReleaseTag", () => {
+  test("accepts v1.18.19", () => {
+    expect(isValidReleaseTag("v1.18.19")).toBe(true)
+  })
+
+  test("accepts v0.0.1", () => {
+    expect(isValidReleaseTag("v0.0.1")).toBe(true)
+  })
+
+  test("accepts v2.0.0-rc.1", () => {
+    expect(isValidReleaseTag("v2.0.0-rc.1")).toBe(true)
+  })
+
+  test("accepts v1.0.0-beta", () => {
+    expect(isValidReleaseTag("v1.0.0-beta")).toBe(true)
+  })
+
+  test("rejects a tag without leading v", () => {
+    expect(isValidReleaseTag("1.18.19")).toBe(false)
+  })
+
+  test("rejects a branch name", () => {
+    expect(isValidReleaseTag("upstream/dev")).toBe(false)
+  })
+
+  test("rejects a moving ref", () => {
+    expect(isValidReleaseTag("dev")).toBe(false)
+  })
+
+  test("rejects empty string", () => {
+    expect(isValidReleaseTag("")).toBe(false)
+  })
+
+  test("rejects a tag with spaces", () => {
+    expect(isValidReleaseTag("v1.18.19 ")).toBe(false)
+  })
+
+  test("rejects shell-injection attempt", () => {
+    expect(isValidReleaseTag("v1.18.19; rm -rf /")).toBe(false)
+  })
+
+  test("rejects a tag with only two version components", () => {
+    expect(isValidReleaseTag("v1.18")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// releaseBranchName (release mode — FR2)
+// ---------------------------------------------------------------------------
+
+describe("releaseBranchName", () => {
+  test("returns sync/release-<tag> for v1.18.19", () => {
+    expect(releaseBranchName("v1.18.19")).toBe("sync/release-v1.18.19")
+  })
+
+  test("returns sync/release-<tag> for v2.0.0-rc.1", () => {
+    expect(releaseBranchName("v2.0.0-rc.1")).toBe("sync/release-v2.0.0-rc.1")
+  })
+
+  test("result is a valid git branch name", () => {
+    expect(isValidBranchName(releaseBranchName("v1.18.19"))).toBe(true)
+  })
+
+  test("result is distinct from dev-mode sync branch names", () => {
+    expect(releaseBranchName("v1.18.19")).not.toMatch(/^sync\/upstream-/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// verifyReleaseSourceSha (release mode — FR1, NFR3)
+// ---------------------------------------------------------------------------
+
+describe("verifyReleaseSourceSha", () => {
+  const approvedSha = "2b72179c663cadcb54f54d9f19221b3fb3d11fb6"
+  const baseRcfg: ReleaseConfig = {
+    releaseTag: "v1.18.19",
+    expectedSourceSha: approvedSha,
+    dryRun: false,
+    remotes: { origin: "origin", upstream: "upstream" },
+    baseBranch: "sinh-x-dev",
+    releaseBranch: "sync/release-v1.18.19",
+  }
+
+  test("passes when remote and local SHAs match the approved SHA", () => {
+    const result = verifyReleaseSourceSha(baseRcfg, approvedSha, approvedSha)
+    expect(result.ok).toBe(true)
+    expect(result.name).toBe("release-source-verified")
+    expect(result.message).toContain(approvedSha)
+  })
+
+  test("fails when remote tag SHA is null (tag not found on upstream)", () => {
+    const result = verifyReleaseSourceSha(baseRcfg, null, approvedSha)
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain("not found on upstream")
+  })
+
+  test("fails when remote tag SHA does not match approved SHA (wrong SHA rejection)", () => {
+    const wrongSha = "0000000000000000000000000000000000000000"
+    const result = verifyReleaseSourceSha(baseRcfg, wrongSha, approvedSha)
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain("remote tag SHA")
+    expect(result.message).toContain(wrongSha)
+    expect(result.message).toContain(approvedSha)
+  })
+
+  test("fails when local tag SHA is null (tag not fetched)", () => {
+    const result = verifyReleaseSourceSha(baseRcfg, approvedSha, null)
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain("not found")
+    expect(result.message).toContain("git fetch upstream --tags")
+  })
+
+  test("fails when local tag SHA does not match approved SHA (tag moved)", () => {
+    const wrongSha = "1111111111111111111111111111111111111111"
+    const result = verifyReleaseSourceSha(baseRcfg, approvedSha, wrongSha)
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain("local tag SHA")
+    expect(result.message).toContain(wrongSha)
+  })
+
+  test("fails when both remote and local are null", () => {
+    const result = verifyReleaseSourceSha(baseRcfg, null, null)
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain("not found on upstream")
+  })
+
+  test("fails when remote matches but local differs (stale local tag)", () => {
+    const wrongSha = "ffffffffffffffffffffffffffffffffffffffff"
+    const result = verifyReleaseSourceSha(baseRcfg, approvedSha, wrongSha)
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain("local tag SHA")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseReleaseArgs (release mode — FR1, mode separation)
+// ---------------------------------------------------------------------------
+
+describe("parseReleaseArgs", () => {
+  const approvedSha = "2b72179c663cadcb54f54d9f19221b3fb3d11fb6"
+  const opts = { dryRun: false, remotes: { origin: "origin", upstream: "upstream" } }
+
+  test("returns null when no release flags are present (dev mode)", () => {
+    const result = parseReleaseArgs(undefined, undefined, "sinh-x-dev", opts)
+    expect(result).toBe(null)
+  })
+
+  test("returns ReleaseConfig when both tag and SHA are valid", () => {
+    const result = parseReleaseArgs("v1.18.19", approvedSha, "sinh-x-dev", opts)
+    expect(result).not.toBe(null)
+    expect(result!.releaseTag).toBe("v1.18.19")
+    expect(result!.expectedSourceSha).toBe(approvedSha)
+    expect(result!.baseBranch).toBe("sinh-x-dev")
+    expect(result!.releaseBranch).toBe("sync/release-v1.18.19")
+    expect(result!.dryRun).toBe(false)
+  })
+
+  test("returns ReleaseConfig with dryRun=true when opts.dryRun is true", () => {
+    const result = parseReleaseArgs("v1.18.19", approvedSha, "sinh-x-dev", { ...opts, dryRun: true })
+    expect(result!.dryRun).toBe(true)
+  })
+
+  test("releaseBranch is derived from tag via releaseBranchName", () => {
+    const result = parseReleaseArgs("v2.0.0", approvedSha, "sinh-x-dev", opts)
+    expect(result!.releaseBranch).toBe(releaseBranchName("v2.0.0"))
+  })
+
+  test("mode separation: dev-mode sync branch is distinct from release branch", () => {
+    const devBranch = syncBranchName(new Date(2026, 7, 21))
+    const relBranch = releaseBranchName("v1.18.19")
+    expect(devBranch).not.toBe(relBranch)
+    expect(devBranch).toMatch(/^sync\/upstream-/)
+    expect(relBranch).toMatch(/^sync\/release-/)
   })
 })
