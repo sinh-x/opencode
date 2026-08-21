@@ -1,4 +1,8 @@
 {
+  "_supported_systems": [
+    "x86_64-linux"
+  ],
+  "_support_note": "Only x86_64-linux (Dragonfly/Linux) is supported and verified by this fork. Other system hashes are inherited from upstream and not guaranteed correct for the final merge tree; they require remote builders or CI to recompute.",
   "nodeModules": {
     "x86_64-linux": "sha256-8VZJyDpPoe/TINIXEoGtNOmr3gv0hcSxCshAnfcsImo=",
     "aarch64-linux": "sha256-JF9VVgnl5QUZ430fqb5Qu8y0kchYJ00LO3FbYcd0lBM=",

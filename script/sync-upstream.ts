@@ -158,7 +158,7 @@ export function parseReleaseArgs(
   releaseTag: string | undefined,
   expectedSourceSha: string | undefined,
   baseBranch: string,
-  opts: { dryRun: boolean; remotes: { origin: string; upstream: string }; forkRepo?: string },
+  opts: { dryRun: boolean; remotes: { origin: string; upstream: string } },
 ): ReleaseConfig | null {
   const hasTag = releaseTag !== undefined
   const hasSha = expectedSourceSha !== undefined
@@ -181,6 +181,9 @@ export function parseReleaseArgs(
       `--expected-source-sha "${expectedSourceSha}" is not a valid 40-character lowercase hex SHA (NFR3)`,
     )
   }
+  // OPS-1R: forkRepo is a placeholder here — the caller (parseCli) resolves it
+  // from branch-strategy.yaml only in release mode, after this function returns
+  // a non-null ReleaseConfig. Dev mode never reads or depends on fork config.
   return {
     releaseTag: releaseTag!,
     expectedSourceSha: expectedSourceSha!,
@@ -188,7 +191,7 @@ export function parseReleaseArgs(
     remotes: opts.remotes,
     baseBranch,
     releaseBranch: releaseBranchName(releaseTag!),
-    forkRepo: opts.forkRepo ?? "sinh-x/opencode",
+    forkRepo: "",
   }
 }
 
@@ -1017,6 +1020,74 @@ async function checkReleaseBranch(rcfg: ReleaseConfig): Promise<CheckResult> {
  * Resume (FR6): if the tag commit is already an ancestor of HEAD, the merge is
  * skipped.
  */
+/**
+ * SEC-1R: injectable shell for stepReleaseMerge so behavior-level tests can
+ * capture the actual git merge/merge-base command vectors and verify the
+ * approved SHA (not the tag ref) is the merge target.
+ */
+export type GitShell = (cmd: string[]) => Promise<string>
+
+const defaultGitShell: GitShell = async (cmd) => {
+  const [bin, ...args] = cmd
+  return await $`${[bin, ...args] as string[]}`.quiet().text()
+}
+
+/**
+ * SEC-1R: pure helper that builds the exact git command vectors for the merge
+ * step. Returns the ancestry-check command and the merge command. Tests use
+ * this to verify the approved SHA is the merge target, not the tag ref.
+ */
+export function buildMergeCommands(rcfg: ReleaseConfig): {
+  ancestry: string[]
+  merge: string[]
+} {
+  const approvedSha = rcfg.expectedSourceSha
+  return {
+    ancestry: ["git", "merge-base", "--is-ancestor", approvedSha, "HEAD"],
+    merge: ["git", "merge", approvedSha],
+  }
+}
+
+/**
+ * SEC-1R: execute the release merge using the approved immutable SHA. Accepts
+ * an injectable shell so behavior-level tests can capture the actual command
+ * vectors and prove the merge target is `expectedSourceSha`, not the tag ref.
+ * This is the behavior-level evidence required by SEC-1R.
+ */
+export async function execReleaseMerge(
+  rcfg: ReleaseConfig,
+  shell: GitShell,
+): Promise<StepResult> {
+  const approvedSha = rcfg.expectedSourceSha
+  const cmds = buildMergeCommands(rcfg)
+  // FR6: skip if the approved commit is already an ancestor of HEAD.
+  try {
+    await shell(cmds.ancestry)
+    return {
+      step: "release-merge",
+      status: "completed",
+      message: `skipped: ${rcfg.releaseTag} (SHA ${approvedSha}) already an ancestor of HEAD`,
+    }
+  } catch {
+    // Not an ancestor — proceed with the merge.
+  }
+  try {
+    const mergeOut = await shell(cmds.merge)
+    return {
+      step: "release-merge",
+      status: "completed",
+      message: `release tag ${rcfg.releaseTag} (SHA ${approvedSha}) merged cleanly into ${rcfg.releaseBranch}`,
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return {
+      step: "release-merge",
+      status: "failed",
+      message: `git merge ${approvedSha} for ${rcfg.releaseTag} failed: ${msg}`,
+    }
+  }
+}
+
 async function stepReleaseMerge(rcfg: ReleaseConfig): Promise<StepResult> {
   using _ = group("FR3 — merge verified release tag into release branch")
   // SEC-1: use the approved immutable SHA directly for ancestry and merge
@@ -1119,25 +1190,47 @@ async function stepReleaseTypecheck(): Promise<StepResult> {
 
 /**
  * FR6: detect an existing PR for the release branch and surface it instead of
- * duplicating. Returns the PR URL and head SHA if found, or null.
+ * duplicating. Returns the PR URL and head SHA if found, or null when the list
+ * is empty (no existing PR).
  *
  * OPS-1: pass `--repo <forkRepo>` explicitly so `gh` never infers the wrong
  * repository.
+ *
+ * CQ-1R: distinguish an empty successful result from a command/auth/API
+ * failure. A `gh pr list` failure (non-zero exit, network error, auth error)
+ * must NOT be converted to "no existing PR" — that would allow accidental
+ * duplicate PR creation. Instead, the function throws so the caller can fail
+ * closed. Only a successful `gh pr list` returning `[]` yields `null`.
  */
 interface ExistingPR {
   url: string
   headRefOid: string
+  baseRefName: string
+  headRefName: string
 }
 
-async function findExistingPR(rcfg: ReleaseConfig): Promise<ExistingPR | null> {
+export type PrListShell = (cmd: string[]) => Promise<string>
+
+const defaultPrListShell: PrListShell = async (cmd) => {
+  const [bin, ...args] = cmd
+  return await $`${[bin, ...args] as string[]}`.quiet().text()
+}
+
+async function findExistingPR(rcfg: ReleaseConfig, shell: PrListShell = defaultPrListShell): Promise<ExistingPR | null> {
   const repoArgs = ghRepoArgs(rcfg.forkRepo)
-  try {
-    const out = await $`gh pr list ${repoArgs as string[]} --head ${rcfg.releaseBranch} --base ${rcfg.baseBranch} --json url,headRefOid --limit 1`.text()
-    const parsed = JSON.parse(out) as Array<{ url: string; headRefOid: string }>
-    return parsed.length > 0 ? { url: parsed[0].url, headRefOid: parsed[0].headRefOid } : null
-  } catch {
-    return null
-  }
+  // CQ-1R: do not catch — let exceptions propagate so the caller fails closed.
+  const out = await shell([
+    "gh", "pr", "list",
+    ...repoArgs,
+    "--head", rcfg.releaseBranch,
+    "--base", rcfg.baseBranch,
+    "--json", "url,headRefOid,baseRefName,headRefName",
+    "--limit", "1",
+  ])
+  const parsed = JSON.parse(out) as Array<{ url: string; headRefOid: string; baseRefName: string; headRefName: string }>
+  if (parsed.length === 0) return null
+  const first = parsed[0]!
+  return { url: first.url, headRefOid: first.headRefOid, baseRefName: first.baseRefName, headRefName: first.headRefName }
 }
 
 /**
@@ -1147,6 +1240,16 @@ async function findExistingPR(rcfg: ReleaseConfig): Promise<ExistingPR | null> {
  * typecheck results (FR7).
  *
  * Resume (FR6): if a PR already exists, surface it instead of creating a duplicate.
+ *
+ * CQ-1R: `findExistingPR` now throws on `gh pr list` failure instead of
+ * returning null. The outer try/catch catches this and fails closed — no
+ * accidental duplicate PR creation on auth/API failure.
+ *
+ * OPS-2R: after PR creation and when surfacing an existing PR, validate the
+ * exact expected tag, source SHA, release target metadata, base branch, release
+ * branch, head SHA, no-auto-merge statement, and gate outcomes. Checking only
+ * generic field labels is insufficient — we read back and validate the exact
+ * PR metadata values.
  */
 async function stepReleasePushAndPR(
   rcfg: ReleaseConfig,
@@ -1165,18 +1268,20 @@ async function stepReleasePushAndPR(
     const localHead = (await $`git rev-parse HEAD`.text()).trim()
 
     // FR6: check for an existing PR (after push so its head matches local).
+    // CQ-1R: findExistingPR throws on gh pr list failure — no silent "no PR".
     const existingPR = await findExistingPR(rcfg)
     if (existingPR) {
-      // CQ-1: verify the PR's headRefOid equals local HEAD. If the PR points
-      // at a different commit, fail instead of surfacing a stale PR.
-      if (existingPR.headRefOid !== localHead) {
+      // OPS-2R: validate exact PR metadata — not just labels but exact values.
+      const prMeta = await readBackPRFull(rcfg, existingPR.url)
+      const metaErrors = validatePRMetadata(prMeta, rcfg, localHead, verification)
+      if (metaErrors.length > 0) {
         return {
           step: "release-push-and-pr",
           status: "failed",
-          message: `existing PR ${existingPR.url} headRefOid ${existingPR.headRefOid} !== local HEAD ${localHead} (CQ-1: PR points at a different commit)`,
+          message: `existing PR ${existingPR.url} metadata mismatch: ${metaErrors.join("; ")}`,
         }
       }
-      okLine(`existing PR found: ${existingPR.url} — head matches local HEAD (FR6)`)
+      okLine(`existing PR found: ${existingPR.url} — all metadata validated (OPS-2R)`)
       return {
         step: "release-push-and-pr",
         status: "completed",
@@ -1192,18 +1297,18 @@ async function stepReleasePushAndPR(
     const prUrl = prOut.trim()
     okLine(`PR created: ${prUrl}`)
 
-    // OPS-2: read back the created PR and verify its body contains the required
-    // provenance fields. Fail if the body is missing required metadata (e.g.
-    // a manual fallback or API error dropped the body).
-    const readBack = await readBackPR(rcfg, prUrl)
-    if (!readBack.bodyOk) {
+    // OPS-2R: read back the created PR and validate exact metadata values,
+    // not just generic field labels. Fail on any mismatch.
+    const prMeta = await readBackPRFull(rcfg, prUrl)
+    const metaErrors = validatePRMetadata(prMeta, rcfg, localHead, verification)
+    if (metaErrors.length > 0) {
       return {
         step: "release-push-and-pr",
         status: "failed",
-        message: `PR created at ${prUrl} but body validation failed: missing ${readBack.missing.join(", ")}`,
+        message: `PR created at ${prUrl} but metadata validation failed: ${metaErrors.join("; ")}`,
       }
     }
-    okLine(`PR body validated: contains all required provenance fields (OPS-2)`)
+    okLine(`PR metadata validated: exact tag, SHA, base, head, and body provenance match (OPS-2R)`)
 
     return {
       step: "release-push-and-pr",
@@ -1261,7 +1366,7 @@ async function buildReleasePRBody(rcfg: ReleaseConfig, steps: VerificationItem[]
   ].join("\n")
 }
 
-/** OPS-2: required provenance substrings that must appear in the PR body. */
+/** OPS-2R: required provenance substrings that must appear in the PR body. */
 const REQUIRED_PR_BODY_FIELDS = [
   "Release tag:",
   "Source SHA:",
@@ -1273,9 +1378,13 @@ const REQUIRED_PR_BODY_FIELDS = [
 ] as const
 
 /**
- * OPS-2: validate that a PR body contains all required provenance fields.
+ * OPS-2: validate that a PR body contains all required provenance field labels.
  * Returns `{ ok: true }` when all fields are present, or `{ ok: false, missing }`
  * listing the absent field names. Pure so tests can pin the exact check.
+ *
+ * OPS-2R: this checks labels only. The exact-value validation is done by
+ * `validatePRMetadata` which compares the actual tag, SHA, base, head, and
+ * metadata values — not just that the labels exist.
  */
 export function validatePRBody(body: string): { ok: boolean; missing: string[] } {
   const missing: string[] = []
@@ -1286,25 +1395,108 @@ export function validatePRBody(body: string): { ok: boolean; missing: string[] }
 }
 
 /**
- * OPS-2: read back a PR by URL (or number) via `gh pr view` with explicit
- * `--repo`, and validate its body. Returns `{ bodyOk, missing, body }`.
+ * OPS-2R: full PR metadata as read back from `gh pr view`. Includes base/head
+ * refs, head SHA, body, and the PR number/URL.
  */
-async function readBackPR(
+export interface PRMetadata {
+  number: number
+  url: string
+  baseRefName: string
+  headRefName: string
+  headRefOid: string
+  body: string
+}
+
+export type PrViewShell = (cmd: string[]) => Promise<string>
+
+const defaultPrViewShell: PrViewShell = async (cmd) => {
+  const [bin, ...args] = cmd
+  return await $`${[bin, ...args] as string[]}`.quiet().text()
+}
+
+/**
+ * OPS-2R: read back a PR by URL (or number) via `gh pr view` with explicit
+ * `--repo`, returning full metadata: base, head, head SHA, body. Throws on
+ * failure so the caller fails closed.
+ */
+async function readBackPRFull(
   rcfg: ReleaseConfig,
   prUrlOrNumber: string,
-): Promise<{ bodyOk: boolean; missing: string[]; body: string }> {
+  shell: PrViewShell = defaultPrViewShell,
+): Promise<PRMetadata> {
   const repoArgs = ghRepoArgs(rcfg.forkRepo)
-  // Extract the PR number from a URL like .../pull/21, or use the string as-is.
   const prNum = prUrlOrNumber.match(/\/pull\/(\d+)/)?.[1] ?? prUrlOrNumber
-  try {
-    const out = await $`gh pr view ${prNum} ${repoArgs as string[]} --json body`.text()
-    const parsed = JSON.parse(out) as { body: string }
-    const result = validatePRBody(parsed.body ?? "")
-    return { bodyOk: result.ok, missing: result.missing, body: parsed.body ?? "" }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { bodyOk: false, missing: ["_readback_failed: " + msg], body: "" }
+  const out = await shell([
+    "gh", "pr", "view", prNum,
+    ...repoArgs,
+    "--json", "number,url,baseRefName,headRefName,headRefOid,body",
+  ])
+  const parsed = JSON.parse(out) as PRMetadata
+  return parsed
+}
+
+/**
+ * OPS-2R: validate exact PR metadata values against the expected release config.
+ * Returns an array of error strings — empty when all values match.
+ *
+ * Checks:
+ * - baseRefName == rcfg.baseBranch
+ * - headRefName == rcfg.releaseBranch
+ * - headRefOid == localHead (exact SHA equality)
+ * - body contains all required field labels (validatePRBody)
+ * - body contains the exact expected tag value
+ * - body contains the exact expected source SHA value
+ * - body contains the exact expected release target metadata (if provided)
+ * - body contains "No Auto-Merge" statement
+ * - body contains all verification gate outcomes
+ *
+ * Checking only generic field labels is insufficient — this function validates
+ * the exact values, rejecting a PR with correct labels but wrong content.
+ */
+export function validatePRMetadata(
+  meta: PRMetadata,
+  rcfg: ReleaseConfig,
+  localHead: string,
+  verification: VerificationItem[],
+): string[] {
+  const errors: string[] = []
+  // Exact base/head ref validation
+  if (meta.baseRefName !== rcfg.baseBranch) {
+    errors.push(`baseRefName "${meta.baseRefName}" !== expected "${rcfg.baseBranch}"`)
   }
+  if (meta.headRefName !== rcfg.releaseBranch) {
+    errors.push(`headRefName "${meta.headRefName}" !== expected "${rcfg.releaseBranch}"`)
+  }
+  if (meta.headRefOid !== localHead) {
+    errors.push(`headRefOid "${meta.headRefOid}" !== local HEAD "${localHead}"`)
+  }
+  // Body label validation
+  const bodyResult = validatePRBody(meta.body ?? "")
+  if (!bodyResult.ok) {
+    errors.push(`body missing required labels: ${bodyResult.missing.join(", ")}`)
+  }
+  // Exact value validation — not just labels
+  const body = meta.body ?? ""
+  if (!body.includes(`\`${rcfg.releaseTag}\``)) {
+    errors.push(`body does not contain exact release tag "${rcfg.releaseTag}"`)
+  }
+  if (!body.includes(`\`${rcfg.expectedSourceSha}\``)) {
+    errors.push(`body does not contain exact source SHA "${rcfg.expectedSourceSha}"`)
+  }
+  if (rcfg.releaseTargetMetadata && !body.includes(`\`${rcfg.releaseTargetMetadata}\``)) {
+    errors.push(`body does not contain exact release target metadata "${rcfg.releaseTargetMetadata}"`)
+  }
+  if (!body.includes("No Auto-Merge")) {
+    errors.push(`body does not contain "No Auto-Merge" statement`)
+  }
+  // Gate outcomes: each verification item must appear as a checked box in the body
+  for (const item of verification) {
+    const box = item.ok ? "[x]" : "[ ]"
+    if (!body.includes(`${box} ${item.label}`) && !body.includes(item.label)) {
+      errors.push(`body does not contain verification gate outcome: ${item.label}`)
+    }
+  }
+  return errors
 }
 
 /**
@@ -1587,30 +1779,61 @@ export function ghRepoArgs(repo: string | null | undefined): string[] {
 }
 
 /**
- * OPS-1: Read the canonical fork repository from `.opencode/branch-strategy.yaml`.
- * Returns the `repository:` value (e.g. `sinh-x/opencode`) or falls back to
- * `sinh-x/opencode` when the file is missing or unparseable. Aborts only when
- * the file exists but contains a malformed (non `owner/name`) repository value.
+ * OPS-1R: Resolve the canonical fork repository from `.opencode/branch-strategy.yaml`.
+ * Called only in release mode (never in dev mode). Has no silent hard-coded
+ * fallback: if the file is missing, unparseable, or the `repository:` value is
+ * malformed, the function aborts before any GitHub mutation. This is fail-closed.
+ *
+ * The `origin` remote URL is used as a secondary validation: if the configured
+ * repository does not match the origin remote's `owner/name`, the function
+ * aborts to prevent gh commands from mutating the wrong repository.
  */
-function readForkRepo(): string {
-  const defaultRepo = "sinh-x/opencode"
+export async function resolveForkRepo(): Promise<string> {
   const strategyPath = path.join(import.meta.dirname, "..", ".opencode", "branch-strategy.yaml")
   let text: string
   try {
-    text = Bun.file(strategyPath).textSync()
+    text = await Bun.file(strategyPath).text()
   } catch {
-    return defaultRepo
+    abort(
+      `OPS-1R: .opencode/branch-strategy.yaml not found at ${strategyPath} — cannot determine canonical fork repo for release-mode gh commands (no silent fallback)`,
+    )
   }
   const repo = extractForkRepo(text)
   if (!repo) {
     abort(
-      `OPS-1: .opencode/branch-strategy.yaml exists but has no parsable "repository:" line — cannot determine canonical fork repo for gh commands`,
+      `OPS-1R: .opencode/branch-strategy.yaml exists but has no parsable top-level "repository:" line matching owner/name — cannot determine canonical fork repo (no silent fallback)`,
+    )
+  }
+  // Validate against the origin remote URL so gh --repo never targets a
+  // repository that does not match the configured origin. This catches a
+  // stale or wrong branch-strategy.yaml before any gh mutation.
+  const originUrl = await remoteUrl("origin")
+  const originRepo = parseGitHubRepo(originUrl)
+  if (!originRepo) {
+    abort(
+      `OPS-1R: origin remote URL "${originUrl}" is not a recognized GitHub URL — cannot validate fork repo consistency`,
+    )
+  }
+  if (originRepo !== repo) {
+    abort(
+      `OPS-1R: branch-strategy.yaml repository "${repo}" does not match origin remote "${originRepo}" (URL: ${originUrl}) — refusing to target a mismatched repository`,
     )
   }
   return repo
 }
 
-function parseCli(): SyncConfig | ReleaseConfig {
+/** Parse a GitHub remote URL (SSH or HTTPS) into `owner/name`. Returns null when not a GitHub URL. */
+export function parseGitHubRepo(url: string): string | null {
+  // SSH: git@github.com:owner/name.git or github.com:owner/name
+  const sshMatch = url.match(/github\.com[:/]([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?$/)
+  if (sshMatch && sshMatch[1]) return sshMatch[1]
+  // HTTPS: https://github.com/owner/name.git
+  const httpsMatch = url.match(/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?$/)
+  if (httpsMatch && httpsMatch[1]) return httpsMatch[1]
+  return null
+}
+
+async function parseCli(): Promise<SyncConfig | ReleaseConfig> {
   const { values } = parseArgs({
     options: {
       "base-branch": { type: "string", default: "sinh-x-dev" },
@@ -1642,18 +1865,15 @@ function parseCli(): SyncConfig | ReleaseConfig {
   const remotes = { origin: "origin", upstream: "upstream" }
   const dryRun = values["dry-run"] ?? false
 
-  // OPS-1: derive the canonical fork repo from branch-strategy.yaml so every
-  // release-mode `gh` command targets the fork explicitly. Dev mode does not
-  // need this (no `gh pr create` in dev mode path that omits --repo).
-  const forkRepo = readForkRepo()
-
   // FR1: parse release-mode flags. Returns ReleaseConfig when release flags are
   // present, or null when dev-mode should be used.
+  // OPS-1R: forkRepo resolution happens only after we know this is release mode.
+  // Dev mode never reads branch-strategy.yaml or depends on fork repository config.
   const rcfg = parseReleaseArgs(
     values["release-tag"],
     values["expected-source-sha"],
     baseBranch,
-    { dryRun, remotes, forkRepo },
+    { dryRun, remotes },
   )
   if (rcfg) {
     // FR2: release mode requires the exact base/PR target `sinh-x-dev`. Reject
@@ -1662,6 +1882,9 @@ function parseCli(): SyncConfig | ReleaseConfig {
     // arbitrary valid branch names; release sync must never target another base.
     const baseError = validateReleaseBase(baseBranch)
     if (baseError) abort(baseError)
+    // OPS-1R: resolve fork repo only in release mode, fail-closed (no silent
+    // fallback). This runs before any GitHub mutation.
+    rcfg.forkRepo = await resolveForkRepo()
     // Attach optional release target metadata if provided.
     if (values["release-target-metadata"]) {
       const meta = values["release-target-metadata"]
@@ -1690,7 +1913,7 @@ function parseCli(): SyncConfig | ReleaseConfig {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  const cfg = parseCli()
+  const cfg = await parseCli()
 
   // Release mode dispatch (Phase 2 — immutable release-tag sync).
   if ("releaseTag" in cfg) {
