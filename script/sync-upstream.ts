@@ -59,7 +59,7 @@ interface SyncConfig {
  * into a pre-created `sync/release-<tag>` branch, never touches `dev` (FR8), and
  * gates push on current-run frozen install + typecheck (NFR6).
  */
-interface ReleaseConfig {
+export interface ReleaseConfig {
   /** Release tag to merge, e.g. `v1.18.19` (FR1). */
   releaseTag: string
   /** Exact approved 40-character source SHA (FR1, NFR3). */
@@ -1259,9 +1259,9 @@ async function releaseMain(rcfg: ReleaseConfig): Promise<void> {
   await $`git fetch ${rcfg.remotes.upstream} --tags`
   okLine(`fetched ${rcfg.remotes.upstream} tags`)
 
-  const remoteTagSha = await remoteTagSha(rcfg)
+  const resolvedRemoteSha = await remoteTagSha(rcfg)
   const localTagSha = await revParse(`refs/tags/${rcfg.releaseTag}`)
-  const sourceResult = verifyReleaseSourceSha(rcfg, remoteTagSha, localTagSha)
+  const sourceResult = verifyReleaseSourceSha(rcfg, resolvedRemoteSha, localTagSha)
   if (!sourceResult.ok) {
     failLine(`${sourceResult.name}: ${sourceResult.message}`)
     abort(sourceResult.message)
@@ -1322,10 +1322,23 @@ async function releaseMain(rcfg: ReleaseConfig): Promise<void> {
   console.log("\n✓ release mode complete: source verified, tag merged, install + typecheck passed, PR created or surfaced")
 }
 
-/** Resolve a tag SHA from the upstream remote via `git ls-remote`. FR1/NFR3. */
-async function remoteTagSha(rcfg: ReleaseConfig): Promise<string | null> {
+/**
+ * Resolve a tag SHA from the upstream remote via `git ls-remote`. FR1/NFR3.
+ *
+ * GAP-1 regression: this function was previously shadowed at its only call site
+ * by a same-named `const` binding (TDZ). It is now exported with an injectable
+ * `shell` so the "callable, returns a SHA" contract is pinned by a unit test.
+ */
+export type LsRemoteShell = (cmd: string[]) => Promise<string>
+
+const defaultLsRemoteShell: LsRemoteShell = async (cmd) => {
+  const [bin, ...args] = cmd
+  return await $`${[bin, ...args] as string[]}`.quiet().text()
+}
+
+export async function remoteTagSha(rcfg: ReleaseConfig, shell: LsRemoteShell = defaultLsRemoteShell): Promise<string | null> {
   try {
-    const out = await $`git ls-remote ${rcfg.remotes.upstream} refs/tags/${rcfg.releaseTag}`.text()
+    const out = await shell(["git", "ls-remote", rcfg.remotes.upstream, `refs/tags/${rcfg.releaseTag}`])
     const sha = out.trim().split(/\s+/)[0]
     return sha.length > 0 ? sha : null
   } catch {
@@ -1361,6 +1374,9 @@ Release mode (immutable release-tag sync — Phase 2):
     --release-target-metadata <sha>  Optional GitHub release target metadata SHA.
     --dry-run                 Run health + source checks only; skip merge,
                                 install, typecheck, push, and PR steps.
+    --base-branch <name>      Release mode REQUIRES exactly \`sinh-x-dev\` (FR2).
+                                Any other value is rejected at parse time before
+                                health checks, fetch, merge, or PR construction.
 
   Release mode never touches \`dev\` (FR8). It merges the verified tag directly
   into \`sync/release-<tag>\` (created from \`sinh-x-dev\` by the orchestrator),
@@ -1368,7 +1384,8 @@ Release mode (immutable release-tag sync — Phase 2):
   (NFR6), and creates or surfaces a PR targeting \`sinh-x-dev\` (FR7).
 
   Both --release-tag and --expected-source-sha are required together; either
-  alone is rejected (FR1). Mixing dev-mode and release-mode flags is rejected.
+  alone is rejected (FR1). Release mode with --base-branch other than
+  \`sinh-x-dev\` is rejected at parse time (FR2).
 
 Health checks (FR1) run in order; the script aborts on the first failure with a
 clear error naming the failed check. Fetch (FR2) runs only after all checks pass.
@@ -1409,6 +1426,17 @@ const SAFE_BRANCH_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._/-]+$/
 
 export function isValidBranchName(name: string): boolean {
   return SAFE_BRANCH_NAME.test(name)
+}
+
+/**
+ * FR2: release mode requires the exact base/PR target `sinh-x-dev`. Any other
+ * release-mode base is rejected during parsing — before health checks, fetch,
+ * merge, or PR construction. Returns `null` when valid, or an error message
+ * string when the base is wrong. Pure so the parser and tests share one truth.
+ */
+export function validateReleaseBase(baseBranch: string): string | null {
+  if (baseBranch === "sinh-x-dev") return null
+  return `release mode requires --base-branch sinh-x-dev (FR2: exact release base/PR target), got "${baseBranch}"`
 }
 
 function parseCli(): SyncConfig | ReleaseConfig {
@@ -1452,6 +1480,12 @@ function parseCli(): SyncConfig | ReleaseConfig {
     { dryRun, remotes },
   )
   if (rcfg) {
+    // FR2: release mode requires the exact base/PR target `sinh-x-dev`. Reject
+    // any other release-mode base during parsing — before health checks, fetch,
+    // merge, or PR construction. This is stricter than dev mode, which accepts
+    // arbitrary valid branch names; release sync must never target another base.
+    const baseError = validateReleaseBase(baseBranch)
+    if (baseError) abort(baseError)
     // Attach optional release target metadata if provided.
     if (values["release-target-metadata"]) {
       const meta = values["release-target-metadata"]

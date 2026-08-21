@@ -114,3 +114,43 @@ jobs:
             exit 1
           fi
           echo "OK: wrong-length SHA rejected with exit $code"
+
+      # GAP-2 (FR2): release mode with --base-branch other than sinh-x-dev must
+      # exit non-zero at parse time — before health checks, fetch, merge, or PR.
+      - name: release mode rejects wrong base-branch at parse time
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --release-tag v1.18.19 --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6 --base-branch origin/dev 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for release mode with --base-branch origin/dev"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "requires --base-branch sinh-x-dev"; then
+            echo "FAIL: expected FR2 base rejection message"
+            exit 1
+          fi
+          if echo "$output" | grep -q "health check"; then
+            echo "FAIL: rejected after health checks instead of at parse time"
+            exit 1
+          fi
+          echo "OK: wrong release base rejected at parse time with exit $code"
+
+      # GAP-2 (FR2): release mode with --base-branch dev must exit non-zero at
+      # parse time — the common confusion case (dev is valid in dev mode).
+      - name: release mode rejects --base-branch dev at parse time
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --release-tag v1.18.19 --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6 --base-branch dev 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for release mode with --base-branch dev"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "requires --base-branch sinh-x-dev"; then
+            echo "FAIL: expected FR2 base rejection message"
+            exit 1
+          fi
+          echo "OK: release base dev rejected at parse time with exit $code"

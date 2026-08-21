@@ -27,8 +27,11 @@ import {
   releaseBranchName,
   verifyReleaseSourceSha,
   parseReleaseArgs,
+  remoteTagSha,
+  validateReleaseBase,
   type WhichFn,
   type GhShell,
+  type LsRemoteShell,
   type ReleaseConfig,
 } from "./sync-upstream.ts"
 
@@ -652,5 +655,116 @@ describe("parseReleaseArgs", () => {
     expect(devBranch).not.toBe(relBranch)
     expect(devBranch).toMatch(/^sync\/upstream-/)
     expect(relBranch).toMatch(/^sync\/release-/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// remoteTagSha (release mode — GAP-1 regression: TDZ name collision fix)
+//
+// GAP-1: `const remoteTagSha = await remoteTagSha(rcfg)` in releaseMain shadowed
+// this function with a TDZ binding, so valid and wrong-SHA dry-runs crashed with
+// `Cannot access 'remoteTagSha' before initialization` before verifyReleaseSourceSha
+// ever ran. The const was renamed to `resolvedRemoteSha`. These tests pin that
+// the function is exported, callable, and returns a SHA string — no TDZ.
+// ---------------------------------------------------------------------------
+
+describe("remoteTagSha", () => {
+  const baseRcfg: ReleaseConfig = {
+    releaseTag: "v1.18.19",
+    expectedSourceSha: "2b72179c663cadcb54f54d9f19221b3fb3d11fb6",
+    dryRun: false,
+    remotes: { origin: "origin", upstream: "upstream" },
+    baseBranch: "sinh-x-dev",
+    releaseBranch: "sync/release-v1.18.19",
+  }
+
+  test("parses the SHA from `git ls-remote` stdout (no TDZ crash)", async () => {
+    const approvedSha = "2b72179c663cadcb54f54d9f19221b3fb3d11fb6"
+    const shell: LsRemoteShell = async () => `${approvedSha}\trefs/tags/v1.18.19\n`
+    const sha = await remoteTagSha(baseRcfg, shell)
+    expect(sha).toBe(approvedSha)
+  })
+
+  test("returns null when the tag is absent from ls-remote output", async () => {
+    const shell: LsRemoteShell = async () => ""
+    const sha = await remoteTagSha(baseRcfg, shell)
+    expect(sha).toBe(null)
+  })
+
+  test("returns null when git ls-remote throws (remote missing)", async () => {
+    const shell: LsRemoteShell = async () => {
+      throw new Error("remote upstream does not exist")
+    }
+    const sha = await remoteTagSha(baseRcfg, shell)
+    expect(sha).toBe(null)
+  })
+
+  test("trims whitespace and takes the first whitespace-delimited token", async () => {
+    const shell: LsRemoteShell = async () => "  deadbeefcafebabe0000000000000000000000aa  refs/tags/v9.9.9  \n"
+    const sha = await remoteTagSha(baseRcfg, shell)
+    expect(sha).toBe("deadbeefcafebabe0000000000000000000000aa")
+  })
+
+  test("the default shell is a function (production path wiring intact)", () => {
+    // Regression for the TDZ fix: remoteTagSha must be a callable function that
+    // is exported, not shadowed by a same-named const at its call site. We only
+    // assert it is a function here — the runtime dry-run (Verification step 3)
+    // exercises the real git ls-remote path.
+    expect(typeof remoteTagSha).toBe("function")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validateReleaseBase (release mode — GAP-2 regression: exact sinh-x-dev base)
+//
+// GAP-2: release mode accepted arbitrary valid --base-branch values and only
+// rejected some later via ancestry health checks. FR2 requires the exact base
+// `sinh-x-dev` and rejection of any other release-mode base during parsing,
+// before health checks, fetch, merge, or PR construction. This pure function is
+// the single source of truth used by parseCli.
+// ---------------------------------------------------------------------------
+
+describe("validateReleaseBase", () => {
+  test("accepts the exact release base sinh-x-dev (returns null)", () => {
+    expect(validateReleaseBase("sinh-x-dev")).toBe(null)
+  })
+
+  test("rejects dev as a release base (returns an error message)", () => {
+    const err = validateReleaseBase("dev")
+    expect(err).not.toBe(null)
+    expect(err).toContain("sinh-x-dev")
+    expect(err).toContain("FR2")
+    expect(err).toContain('"dev"')
+  })
+
+  test("rejects origin/dev as a release base", () => {
+    const err = validateReleaseBase("origin/dev")
+    expect(err).not.toBe(null)
+    expect(err).toContain("sinh-x-dev")
+    expect(err).toContain('"origin/dev"')
+  })
+
+  test("rejects main as a release base", () => {
+    const err = validateReleaseBase("main")
+    expect(err).not.toBe(null)
+    expect(err).toContain('"main"')
+  })
+
+  test("rejects a release-sync branch as a release base", () => {
+    const err = validateReleaseBase("sync/release-v1.18.19")
+    expect(err).not.toBe(null)
+    expect(err).toContain("sync/release-v1.18.19")
+  })
+
+  test("rejects an empty string as a release base", () => {
+    const err = validateReleaseBase("")
+    expect(err).not.toBe(null)
+    expect(err).toContain("sinh-x-dev")
+  })
+
+  test("error message names the wrong base and the required base", () => {
+    const err = validateReleaseBase("feature/foo")
+    expect(err).toContain("--base-branch sinh-x-dev")
+    expect(err).toContain('"feature/foo"')
   })
 })
