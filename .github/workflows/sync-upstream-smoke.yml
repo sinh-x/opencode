@@ -45,3 +45,112 @@ jobs:
             exit 1
           fi
           echo "OK: invalid --base-branch rejected with exit $code"
+
+      # Release-mode smoke (Phase 2 — FR1, NFR3, NFR5):
+      # --release-tag without --expected-source-sha must exit non-zero (FR1).
+      - name: release mode rejects tag without SHA
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --release-tag v1.18.19 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for --release-tag without --expected-source-sha"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "requires both"; then
+            echo "FAIL: expected 'requires both' rejection message"
+            exit 1
+          fi
+          echo "OK: release tag without SHA rejected with exit $code"
+
+      # --expected-source-sha without --release-tag must exit non-zero (FR1).
+      - name: release mode rejects SHA without tag
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for --expected-source-sha without --release-tag"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "requires both"; then
+            echo "FAIL: expected 'requires both' rejection message"
+            exit 1
+          fi
+          echo "OK: SHA without tag rejected with exit $code"
+
+      # Malformed release tag must exit non-zero (FR1).
+      - name: release mode rejects malformed tag
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --release-tag "not-a-tag" --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for malformed --release-tag"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "not a valid release tag"; then
+            echo "FAIL: expected 'not a valid release tag' rejection message"
+            exit 1
+          fi
+          echo "OK: malformed release tag rejected with exit $code"
+
+      # Abbreviated/wrong SHA must exit non-zero (NFR3 — no abbreviated SHA).
+      - name: release mode rejects wrong-length SHA
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --release-tag v1.18.19 --expected-source-sha "abc123" 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for abbreviated --expected-source-sha"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "not a valid 40-character"; then
+            echo "FAIL: expected 'not a valid 40-character' rejection message"
+            exit 1
+          fi
+          echo "OK: wrong-length SHA rejected with exit $code"
+
+      # GAP-2 (FR2): release mode with --base-branch other than sinh-x-dev must
+      # exit non-zero at parse time — before health checks, fetch, merge, or PR.
+      - name: release mode rejects wrong base-branch at parse time
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --release-tag v1.18.19 --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6 --base-branch origin/dev 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for release mode with --base-branch origin/dev"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "requires --base-branch sinh-x-dev"; then
+            echo "FAIL: expected FR2 base rejection message"
+            exit 1
+          fi
+          if echo "$output" | grep -q "health check"; then
+            echo "FAIL: rejected after health checks instead of at parse time"
+            exit 1
+          fi
+          echo "OK: wrong release base rejected at parse time with exit $code"
+
+      # GAP-2 (FR2): release mode with --base-branch dev must exit non-zero at
+      # parse time — the common confusion case (dev is valid in dev mode).
+      - name: release mode rejects --base-branch dev at parse time
+        run: |
+          set +e
+          output=$(bun run script/sync-upstream.ts --release-tag v1.18.19 --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6 --base-branch dev 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit for release mode with --base-branch dev"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "requires --base-branch sinh-x-dev"; then
+            echo "FAIL: expected FR2 base rejection message"
+            exit 1
+          fi
+          echo "OK: release base dev rejected at parse time with exit $code"

@@ -133,6 +133,77 @@ If `dev -> sinh-x-dev` cannot merge directly, ask Sinh before choosing one of th
 
 Do not target `dev` from `sync/upstream-<date>`. Do not merge `sinh-x-dev` into `dev` to resolve conflicts.
 
+## Release Sync Flow
+
+Release sync is a distinct, immutable-source flow separate from the moving `upstream/dev` mirror sync. It merges a verified upstream release tag directly into a `sync/release-<tag>` branch created from `sinh-x-dev`.
+
+```text
+upstream/tags/v1.18.19 -> sync/release-v1.18.19 -> PR -> sinh-x-dev
+```
+
+- `dev` is never touched, checked out, merged, reset, or pushed in release mode (FR8).
+- The release branch `sync/release-<tag>` is created from `sinh-x-dev` by the orchestrator and targets `sinh-x-dev` (FR2).
+- Source identity is verified against an exact approved 40-character SHA before any merge (FR1, NFR3). Mismatched or abbreviated SHAs are rejected.
+- `bun install --frozen-lockfile` runs before `bun typecheck` and before any push (NFR6).
+- The PR title is `chore(sync): merge release v1.18.19 into sinh-x-dev` (FR7).
+- Conflicts are reported and left for human resolution — no automatic conflict edits (FR5).
+- Re-running the script detects completed steps and surfaces an existing PR instead of duplicating (FR6).
+
+### Release Mode Invocation
+
+From the repository root (after the orchestrator has created `sync/release-<tag>`):
+
+```bash
+bun run script/sync-upstream.ts --release-tag v1.18.19 --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6
+bun run script/sync-upstream.ts --release-tag v1.18.19 --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6 --dry-run
+bun run script/sync-upstream.ts --release-tag v1.18.19 --expected-source-sha 2b72179c663cadcb54f54d9f19221b3fb3d11fb6 --release-target-metadata f4a89683da2fb5fd1b37995402100ca7a24a8484
+```
+
+Both `--release-tag` and `--expected-source-sha` are required together; either alone is rejected (FR1). Mixing dev-mode and release-mode flags is rejected.
+
+### Release Mode Confirmation Gates
+
+| Step | Mutation? | Confirmation required? |
+|---|---|---|
+| `--dry-run` (health + source checks only) | No | **No** — safe to run automatically |
+| `--help` | No | **No** — safe to run automatically |
+| Fetch upstream tags | Remote read + ref update | **No** — does not touch the worktree |
+| Merge verified tag into release branch | Yes | **Yes** — ask Sinh before invoking without `--dry-run` |
+| `bun install --frozen-lockfile` | Local install | No (pre-push gate) |
+| `bun typecheck` | No (build/read-only) | No |
+| Push release branch to origin | Yes | **Yes** |
+| `gh pr create` targeting `sinh-x-dev` | Yes (opens PR) | **Yes** — PR review is the human gate |
+
+### Release Mode Conflict Path
+
+If the tag merge produces conflicts, the script halts with exit code 2 and leaves the in-progress merge in place for human resolution:
+
+1. Report the conflicting files list to Sinh.
+2. Ask Sinh to resolve each conflict: edit → `git add <file>` → `git commit --no-edit`.
+3. After Sinh confirms the merge is committed and the worktree is clean, re-run the script. It will detect the tag is already an ancestor of HEAD and skip to the install + typecheck step (FR6).
+4. If Sinh prefers to abort, run `git merge --abort` and re-run from scratch.
+
+Do not resolve conflicts yourself unless Sinh explicitly delegates it.
+
+### Release Mode Resume
+
+Re-running release mode detects completed steps via git ref comparison:
+
+- **Source verification** re-runs every time (read-only).
+- **Tag merge skips** when the tag commit is already an ancestor of HEAD.
+- **Frozen install re-runs** every time (idempotent with `--frozen-lockfile`).
+- **Typecheck re-runs** every time (read-only).
+- **Push re-runs** idempotently (`git push -u` is a no-op if already pushed).
+- **Existing PR is surfaced** via `gh pr list --head <branch>` instead of duplicating (FR6).
+
+### Forbidden Release Operations
+
+- Do not checkout, merge, reset, or push `dev` in release mode (FR8).
+- Do not use a moving ref (`upstream/dev`, `upstream/production`) as the release source.
+- Do not accept an abbreviated or mismatched SHA (NFR3).
+- Do not auto-merge, create or move tags, publish npm packages, or submit upstream work.
+- Do not target `dev` from `sync/release-<tag>`.
+
 ## Agent Sync
 
 The agent-executable script `script/sync-upstream.ts` automates the upstream → dev → sinh-x-dev sync flow described in **Upstream Sync Flow** above. PA agents (builder, maintenance) MUST use this script instead of running the interactive git sequence by hand. The manual sequence above remains for non-PA / human-driven syncs.

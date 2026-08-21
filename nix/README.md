@@ -2,6 +2,21 @@
 
 This directory holds the Nix derivations that build the fork from source.
 
+## Supported platform
+
+This fork is developed and verified on **Dragonfly `x86_64-linux`** only. The
+`nix/hashes.json` `x86_64-linux` entry is recomputed and independently verified
+after each `bun.lock` change using `nix/scripts/recompute-hashes.sh x86_64-linux`.
+
+The `aarch64-linux`, `aarch64-darwin`, and `x86_64-darwin` hashes are inherited
+from upstream and are **not guaranteed correct** for this fork's final merge
+tree. They require remote builders or CI to recompute. Do not rely on them
+unless you have verified them on the target platform.
+
+Per the OPS-3R scope decision: this fork only needs to work on the Dragonfly
+`x86_64-linux` system. ARM and Darwin builders are not required, and their
+hashes are not fabricated.
+
 ## Packages
 
 | Attribute | Description |

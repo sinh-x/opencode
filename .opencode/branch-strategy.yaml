@@ -53,6 +53,16 @@ feature_branches:
     target: sinh-x-dev
     notes:
       - Use only when upstream changes need conflict resolution before reaching sinh-x-dev.
+  release_sync:
+    pattern: sync/release-*
+    base: sinh-x-dev
+    target: sinh-x-dev
+    notes:
+      - Immutable release-tag sync flow. Merges a verified upstream release tag (e.g. v1.18.19) directly into the release branch.
+      - Never touches dev (FR8). The release branch is created from sinh-x-dev and targets sinh-x-dev.
+      - Source identity is verified against an exact approved 40-character SHA before merge (NFR3).
+      - Frozen install and typecheck gate every push (NFR6).
+      - Distinct from upstream_sync (sync/upstream-*), which mirrors the moving upstream/dev ref through dev.
 
 pull_requests:
   title_format: conventional_commit
@@ -76,6 +86,10 @@ flows:
     - upstream/dev
     - dev
     - sinh-x-dev
+  release_sync:
+    - upstream/tags/v1.18.19
+    - sync/release-v1.18.19
+    - sinh-x-dev
   personal_work:
     - sinh-x-dev
     - feat/*
@@ -91,6 +105,9 @@ prohibited_flows:
   - from: sinh-x-dev
     to: upstream/dev
     reason: Personal customizations are not submitted upstream by default.
+  - from: sync/release-*
+    to: dev
+    reason: Release sync branches merge upstream tags directly into sinh-x-dev; they must never touch dev (FR8).
 
 agent_rules:
   choose_base_branch:
