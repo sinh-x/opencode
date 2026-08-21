@@ -36,6 +36,7 @@
 
 import { $ } from "bun"
 import { parseArgs } from "node:util"
+import path from "node:path"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,6 +75,8 @@ export interface ReleaseConfig {
   baseBranch: string
   /** The release sync branch: `sync/release-<tag>` (FR2). */
   releaseBranch: string
+  /** Canonical fork repository from branch-strategy.yaml, e.g. `sinh-x/opencode` (OPS-1). */
+  forkRepo: string
 }
 
 interface CheckResult {
@@ -155,7 +158,7 @@ export function parseReleaseArgs(
   releaseTag: string | undefined,
   expectedSourceSha: string | undefined,
   baseBranch: string,
-  opts: { dryRun: boolean; remotes: { origin: string; upstream: string } },
+  opts: { dryRun: boolean; remotes: { origin: string; upstream: string }; forkRepo?: string },
 ): ReleaseConfig | null {
   const hasTag = releaseTag !== undefined
   const hasSha = expectedSourceSha !== undefined
@@ -185,6 +188,7 @@ export function parseReleaseArgs(
     remotes: opts.remotes,
     baseBranch,
     releaseBranch: releaseBranchName(releaseTag!),
+    forkRepo: opts.forkRepo ?? "sinh-x/opencode",
   }
 }
 
@@ -1015,30 +1019,36 @@ async function checkReleaseBranch(rcfg: ReleaseConfig): Promise<CheckResult> {
  */
 async function stepReleaseMerge(rcfg: ReleaseConfig): Promise<StepResult> {
   using _ = group("FR3 — merge verified release tag into release branch")
-  const tagRef = `refs/tags/${rcfg.releaseTag}`
-  // FR6: skip if the tag is already an ancestor of HEAD.
+  // SEC-1: use the approved immutable SHA directly for ancestry and merge
+  // operations. The tag ref is mutable (can be replaced after validation), so
+  // binding merge/ancestry to `refs/tags/<tag>` creates a TOCTOU gap. We
+  // resolve and validate the peeled commit once (in releaseMain via
+  // verifyReleaseSourceSha) and use `expectedSourceSha` here. The tag is
+  // retained only as provenance in the log line below.
+  const approvedSha = rcfg.expectedSourceSha
+  // FR6: skip if the approved commit is already an ancestor of HEAD.
   try {
-    await $`git merge-base --is-ancestor ${tagRef} HEAD`.quiet()
-    okLine(`${rcfg.releaseTag} already merged into ${rcfg.releaseBranch} — skipping (resume)`)
+    await $`git merge-base --is-ancestor ${approvedSha} HEAD`.quiet()
+    okLine(`${rcfg.releaseTag} (${approvedSha}) already merged into ${rcfg.releaseBranch} — skipping (resume)`)
     return {
       step: "release-merge",
       status: "completed",
-      message: `skipped: ${rcfg.releaseTag} already an ancestor of HEAD`,
+      message: `skipped: ${rcfg.releaseTag} (SHA ${approvedSha}) already an ancestor of HEAD`,
     }
   } catch {
     // Not an ancestor — proceed with the merge.
   }
   try {
-    okLine(`merging ${rcfg.releaseTag} (${rcfg.expectedSourceSha}) into ${rcfg.releaseBranch}…`)
+    okLine(`merging ${rcfg.releaseTag} (SHA ${approvedSha}) into ${rcfg.releaseBranch}…`)
     try {
-      await $`git merge ${tagRef}`
+      await $`git merge ${approvedSha}`
     } catch (err) {
       if (await hasMergeConflicts()) {
         const files = await conflictingFiles()
         return {
           step: "release-merge",
           status: "conflict",
-          message: `merge ${rcfg.releaseTag} into ${rcfg.releaseBranch} produced ${files.length} conflict(s)`,
+          message: `merge ${rcfg.releaseTag} (SHA ${approvedSha}) into ${rcfg.releaseBranch} produced ${files.length} conflict(s)`,
           conflictingFiles: files,
         }
       }
@@ -1047,14 +1057,14 @@ async function stepReleaseMerge(rcfg: ReleaseConfig): Promise<StepResult> {
       return {
         step: "release-merge",
         status: "failed",
-        message: `git merge ${rcfg.releaseTag} failed (no conflict markers): ${msg}`,
+        message: `git merge ${approvedSha} for ${rcfg.releaseTag} failed (no conflict markers): ${msg}`,
       }
     }
-    okLine(`merged ${rcfg.releaseTag} into ${rcfg.releaseBranch}`)
+    okLine(`merged ${rcfg.releaseTag} (SHA ${approvedSha}) into ${rcfg.releaseBranch}`)
     return {
       step: "release-merge",
       status: "completed",
-      message: `release tag ${rcfg.releaseTag} merged cleanly into ${rcfg.releaseBranch}`,
+      message: `release tag ${rcfg.releaseTag} (SHA ${approvedSha}) merged cleanly into ${rcfg.releaseBranch}`,
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -1109,13 +1119,22 @@ async function stepReleaseTypecheck(): Promise<StepResult> {
 
 /**
  * FR6: detect an existing PR for the release branch and surface it instead of
- * duplicating. Returns the PR URL if found, or null.
+ * duplicating. Returns the PR URL and head SHA if found, or null.
+ *
+ * OPS-1: pass `--repo <forkRepo>` explicitly so `gh` never infers the wrong
+ * repository.
  */
-async function findExistingPR(rcfg: ReleaseConfig): Promise<string | null> {
+interface ExistingPR {
+  url: string
+  headRefOid: string
+}
+
+async function findExistingPR(rcfg: ReleaseConfig): Promise<ExistingPR | null> {
+  const repoArgs = ghRepoArgs(rcfg.forkRepo)
   try {
-    const out = await $`gh pr list --head ${rcfg.releaseBranch} --base ${rcfg.baseBranch} --json url --limit 1`.text()
-    const parsed = JSON.parse(out) as Array<{ url: string }>
-    return parsed.length > 0 ? parsed[0].url : null
+    const out = await $`gh pr list ${repoArgs as string[]} --head ${rcfg.releaseBranch} --base ${rcfg.baseBranch} --json url,headRefOid --limit 1`.text()
+    const parsed = JSON.parse(out) as Array<{ url: string; headRefOid: string }>
+    return parsed.length > 0 ? { url: parsed[0].url, headRefOid: parsed[0].headRefOid } : null
   } catch {
     return null
   }
@@ -1134,28 +1153,58 @@ async function stepReleasePushAndPR(
   verification: VerificationItem[],
 ): Promise<StepResult> {
   using _ = group("FR7 — push release branch + create or surface PR")
+  const repoArgs = ghRepoArgs(rcfg.forkRepo)
   try {
-    // FR6: check for an existing PR first.
-    const existingPR = await findExistingPR(rcfg)
-    if (existingPR) {
-      okLine(`existing PR found: ${existingPR} — surfacing instead of duplicating (FR6)`)
-      return {
-        step: "release-push-and-pr",
-        status: "completed",
-        message: `skipped: existing PR surfaced: ${existingPR}`,
-      }
-    }
+    // CQ-1: push the validated release branch BEFORE PR lookup so a resumed
+    // run with a newer local commit does not leave the PR on a stale remote.
+    // The push is idempotent when local and remote are already in sync.
     okLine(`pushing ${rcfg.releaseBranch} to ${rcfg.remotes.origin}…`)
     await $`git push -u ${rcfg.remotes.origin} ${rcfg.releaseBranch}`
     okLine(`pushed ${rcfg.releaseBranch}`)
+
+    const localHead = (await $`git rev-parse HEAD`.text()).trim()
+
+    // FR6: check for an existing PR (after push so its head matches local).
+    const existingPR = await findExistingPR(rcfg)
+    if (existingPR) {
+      // CQ-1: verify the PR's headRefOid equals local HEAD. If the PR points
+      // at a different commit, fail instead of surfacing a stale PR.
+      if (existingPR.headRefOid !== localHead) {
+        return {
+          step: "release-push-and-pr",
+          status: "failed",
+          message: `existing PR ${existingPR.url} headRefOid ${existingPR.headRefOid} !== local HEAD ${localHead} (CQ-1: PR points at a different commit)`,
+        }
+      }
+      okLine(`existing PR found: ${existingPR.url} — head matches local HEAD (FR6)`)
+      return {
+        step: "release-push-and-pr",
+        status: "completed",
+        message: `skipped: existing PR surfaced: ${existingPR.url}`,
+      }
+    }
 
     const title = `chore(sync): merge release ${rcfg.releaseTag} into ${rcfg.baseBranch}`
     const body = await buildReleasePRBody(rcfg, verification)
 
     okLine("creating PR via `gh pr create`…")
-    const prOut = await $`gh pr create --base ${rcfg.baseBranch} --head ${rcfg.releaseBranch} --title ${title} --body ${body}`.text()
+    const prOut = await $`gh pr create ${repoArgs as string[]} --base ${rcfg.baseBranch} --head ${rcfg.releaseBranch} --title ${title} --body ${body}`.text()
     const prUrl = prOut.trim()
     okLine(`PR created: ${prUrl}`)
+
+    // OPS-2: read back the created PR and verify its body contains the required
+    // provenance fields. Fail if the body is missing required metadata (e.g.
+    // a manual fallback or API error dropped the body).
+    const readBack = await readBackPR(rcfg, prUrl)
+    if (!readBack.bodyOk) {
+      return {
+        step: "release-push-and-pr",
+        status: "failed",
+        message: `PR created at ${prUrl} but body validation failed: missing ${readBack.missing.join(", ")}`,
+      }
+    }
+    okLine(`PR body validated: contains all required provenance fields (OPS-2)`)
+
     return {
       step: "release-push-and-pr",
       status: "completed",
@@ -1203,9 +1252,59 @@ async function buildReleasePRBody(rcfg: ReleaseConfig, steps: VerificationItem[]
     ``,
     checklist,
     ``,
+    `### No Auto-Merge`,
+    ``,
+    `This PR must not be auto-merged. It requires manual review and explicit merge approval after all gate evidence is verified.`,
+    ``,
     `---`,
     `_Generated by \`script/sync-upstream.ts\` release mode (Phase 2). Immutable source sync — no \`dev\` mutation (FR8)._`,
   ].join("\n")
+}
+
+/** OPS-2: required provenance substrings that must appear in the PR body. */
+const REQUIRED_PR_BODY_FIELDS = [
+  "Release tag:",
+  "Source SHA:",
+  "Release target metadata:",
+  "Base branch:",
+  "Release branch:",
+  "Verification",
+  "No Auto-Merge",
+] as const
+
+/**
+ * OPS-2: validate that a PR body contains all required provenance fields.
+ * Returns `{ ok: true }` when all fields are present, or `{ ok: false, missing }`
+ * listing the absent field names. Pure so tests can pin the exact check.
+ */
+export function validatePRBody(body: string): { ok: boolean; missing: string[] } {
+  const missing: string[] = []
+  for (const field of REQUIRED_PR_BODY_FIELDS) {
+    if (!body.includes(field)) missing.push(field)
+  }
+  return { ok: missing.length === 0, missing }
+}
+
+/**
+ * OPS-2: read back a PR by URL (or number) via `gh pr view` with explicit
+ * `--repo`, and validate its body. Returns `{ bodyOk, missing, body }`.
+ */
+async function readBackPR(
+  rcfg: ReleaseConfig,
+  prUrlOrNumber: string,
+): Promise<{ bodyOk: boolean; missing: string[]; body: string }> {
+  const repoArgs = ghRepoArgs(rcfg.forkRepo)
+  // Extract the PR number from a URL like .../pull/21, or use the string as-is.
+  const prNum = prUrlOrNumber.match(/\/pull\/(\d+)/)?.[1] ?? prUrlOrNumber
+  try {
+    const out = await $`gh pr view ${prNum} ${repoArgs as string[]} --json body`.text()
+    const parsed = JSON.parse(out) as { body: string }
+    const result = validatePRBody(parsed.body ?? "")
+    return { bodyOk: result.ok, missing: result.missing, body: parsed.body ?? "" }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return { bodyOk: false, missing: ["_readback_failed: " + msg], body: "" }
+  }
 }
 
 /**
@@ -1219,6 +1318,7 @@ async function releaseMain(rcfg: ReleaseConfig): Promise<void> {
   console.log(`  expected-source-sha: ${rcfg.expectedSourceSha}`)
   console.log(`  release-branch:    ${rcfg.releaseBranch}`)
   console.log(`  base-branch:       ${rcfg.baseBranch}`)
+  console.log(`  fork-repo:         ${rcfg.forkRepo}`)
   console.log(`  dry-run:           ${rcfg.dryRun}`)
 
   const verification: VerificationItem[] = []
@@ -1269,6 +1369,23 @@ async function releaseMain(rcfg: ReleaseConfig): Promise<void> {
   okLine(`${sourceResult.name}: ${sourceResult.message}`)
   verification.push({
     label: `Release source verified: tag \`${rcfg.releaseTag}\` resolves to \`${rcfg.expectedSourceSha}\` (remote + local)`,
+    ok: true,
+  })
+
+  // SEC-1: resolve the peeled commit from the tag once and verify it equals
+  // the approved SHA. This binds all downstream merge/ancestry operations to
+  // the immutable commit object, not the mutable tag ref. For lightweight
+  // tags, `refs/tags/<tag>^{commit}` resolves to the tag's target. For
+  // annotated tags, it peels through the tag object to the commit.
+  const peeledSha = await revParse(`refs/tags/${rcfg.releaseTag}^{commit}`)
+  if (!peeledSha || peeledSha !== rcfg.expectedSourceSha) {
+    abort(
+      `SEC-1: peeled commit ${peeledSha ?? "(null)"} from refs/tags/${rcfg.releaseTag}^{commit} !== approved ${rcfg.expectedSourceSha} — tag may have been replaced after validation`,
+    )
+  }
+  okLine(`SEC-1: peeled commit ${peeledSha} matches approved SHA — using immutable SHA for merge (not tag ref)`)
+  verification.push({
+    label: `SEC-1: peeled tag commit \`${peeledSha}\` matches approved SHA — merge uses immutable SHA, not tag ref`,
     ok: true,
   })
 
@@ -1439,6 +1556,60 @@ export function validateReleaseBase(baseBranch: string): string | null {
   return `release mode requires --base-branch sinh-x-dev (FR2: exact release base/PR target), got "${baseBranch}"`
 }
 
+/**
+ * OPS-1: Extract the canonical `repository:` value from branch-strategy.yaml
+ * text. Returns null when not found or malformed. Pure so tests can pin the
+ * exact parsing without file IO.
+ *
+ * The YAML top-level `repository:` line is expected to be `owner/name` (no
+ * protocol, no trailing slash). We accept the first whitespace-delimited token
+ * after the colon, trimmed and stripped of surrounding quotes.
+ */
+const FORK_REPO_RE = /^repository:\s*'?([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)'?\s*$/
+
+export function extractForkRepo(yamlText: string): string | null {
+  for (const line of yamlText.split("\n")) {
+    const m = line.match(FORK_REPO_RE)
+    if (m) return m[1]
+  }
+  return null
+}
+
+/**
+ * OPS-1: Build the `--repo <owner/name>` argument segment for `gh` commands.
+ * Returns the two-element array `["--repo", repo]` when `repo` is a non-empty
+ * string, or an empty array when `repo` is null/empty (dev mode, no fork repo).
+ * Pure so tests can assert the exact argument vectors passed to `gh`.
+ */
+export function ghRepoArgs(repo: string | null | undefined): string[] {
+  if (!repo) return []
+  return ["--repo", repo]
+}
+
+/**
+ * OPS-1: Read the canonical fork repository from `.opencode/branch-strategy.yaml`.
+ * Returns the `repository:` value (e.g. `sinh-x/opencode`) or falls back to
+ * `sinh-x/opencode` when the file is missing or unparseable. Aborts only when
+ * the file exists but contains a malformed (non `owner/name`) repository value.
+ */
+function readForkRepo(): string {
+  const defaultRepo = "sinh-x/opencode"
+  const strategyPath = path.join(import.meta.dirname, "..", ".opencode", "branch-strategy.yaml")
+  let text: string
+  try {
+    text = Bun.file(strategyPath).textSync()
+  } catch {
+    return defaultRepo
+  }
+  const repo = extractForkRepo(text)
+  if (!repo) {
+    abort(
+      `OPS-1: .opencode/branch-strategy.yaml exists but has no parsable "repository:" line — cannot determine canonical fork repo for gh commands`,
+    )
+  }
+  return repo
+}
+
 function parseCli(): SyncConfig | ReleaseConfig {
   const { values } = parseArgs({
     options: {
@@ -1471,13 +1642,18 @@ function parseCli(): SyncConfig | ReleaseConfig {
   const remotes = { origin: "origin", upstream: "upstream" }
   const dryRun = values["dry-run"] ?? false
 
+  // OPS-1: derive the canonical fork repo from branch-strategy.yaml so every
+  // release-mode `gh` command targets the fork explicitly. Dev mode does not
+  // need this (no `gh pr create` in dev mode path that omits --repo).
+  const forkRepo = readForkRepo()
+
   // FR1: parse release-mode flags. Returns ReleaseConfig when release flags are
   // present, or null when dev-mode should be used.
   const rcfg = parseReleaseArgs(
     values["release-tag"],
     values["expected-source-sha"],
     baseBranch,
-    { dryRun, remotes },
+    { dryRun, remotes, forkRepo },
   )
   if (rcfg) {
     // FR2: release mode requires the exact base/PR target `sinh-x-dev`. Reject

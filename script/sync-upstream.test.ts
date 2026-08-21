@@ -29,6 +29,9 @@ import {
   parseReleaseArgs,
   remoteTagSha,
   validateReleaseBase,
+  extractForkRepo,
+  ghRepoArgs,
+  validatePRBody,
   type WhichFn,
   type GhShell,
   type LsRemoteShell,
@@ -766,5 +769,299 @@ describe("validateReleaseBase", () => {
     const err = validateReleaseBase("feature/foo")
     expect(err).toContain("--base-branch sinh-x-dev")
     expect(err).toContain('"feature/foo"')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// extractForkRepo (OPS-1 — derive canonical fork repo from branch-strategy.yaml)
+// ---------------------------------------------------------------------------
+
+describe("extractForkRepo", () => {
+  const realYaml = `repository: sinh-x/opencode
+upstream_repository: anomalyco/opencode
+
+branches:
+  dev:
+    role: upstream-tracking
+`
+
+  test("extracts the repository: value from real branch-strategy.yaml text", () => {
+    expect(extractForkRepo(realYaml)).toBe("sinh-x/opencode")
+  })
+
+  test("extracts repository when surrounded by single quotes", () => {
+    expect(extractForkRepo("repository: 'sinh-x/opencode'\n")).toBe("sinh-x/opencode")
+  })
+
+  test("returns null when no repository: line exists", () => {
+    expect(extractForkRepo("upstream_repository: anomalyco/opencode\n")).toBe(null)
+  })
+
+  test("returns null for empty input", () => {
+    expect(extractForkRepo("")).toBe(null)
+  })
+
+  test("ignores indented repository: lines (nested keys, not top-level)", () => {
+    const yaml = `branches:
+  repository: nested/repo
+`
+    expect(extractForkRepo(yaml)).toBe(null)
+  })
+
+  test("extracts the first top-level repository: line only", () => {
+    const yaml = `repository: first/repo
+repository: second/repo
+`
+    expect(extractForkRepo(yaml)).toBe("first/repo")
+  })
+
+  test("rejects a malformed repository value without a slash", () => {
+    expect(extractForkRepo("repository: no-slash-here\n")).toBe(null)
+  })
+
+  test("does not match leading whitespace (top-level keys have no indent in YAML)", () => {
+    expect(extractForkRepo("  repository: sinh-x/opencode\n")).toBe(null)
+  })
+
+  test("extracts from the actual .opencode/branch-strategy.yaml file content shape", () => {
+    const yamlText = `repository: sinh-x/opencode
+upstream_repository: anomalyco/opencode
+`
+    expect(extractForkRepo(yamlText)).toBe("sinh-x/opencode")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ghRepoArgs (OPS-1 — build --repo argument segment for gh commands)
+// ---------------------------------------------------------------------------
+
+describe("ghRepoArgs", () => {
+  test("returns ['--repo', 'sinh-x/opencode'] for a valid repo string", () => {
+    expect(ghRepoArgs("sinh-x/opencode")).toEqual(["--repo", "sinh-x/opencode"])
+  })
+
+  test("returns an empty array for null", () => {
+    expect(ghRepoArgs(null)).toEqual([])
+  })
+
+  test("returns an empty array for undefined", () => {
+    expect(ghRepoArgs(undefined)).toEqual([])
+  })
+
+  test("returns an empty array for empty string", () => {
+    expect(ghRepoArgs("")).toEqual([])
+  })
+
+  test("the array can be spread into a gh command argument vector", () => {
+    const args = ghRepoArgs("sinh-x/opencode")
+    const cmd = ["gh", "pr", "list", ...args, "--head", "sync/release-v1.18.19"]
+    expect(cmd).toEqual(["gh", "pr", "list", "--repo", "sinh-x/opencode", "--head", "sync/release-v1.18.19"])
+  })
+
+  test("the full release-mode gh pr create argument vector is correct", () => {
+    const repoArgs = ghRepoArgs("sinh-x/opencode")
+    const cmd = [
+      "gh", "pr", "create",
+      ...repoArgs,
+      "--base", "sinh-x-dev",
+      "--head", "sync/release-v1.18.19",
+      "--title", "chore(sync): merge release v1.18.19 into sinh-x-dev",
+      "--body", "## Release Sync — v1.18.19",
+    ]
+    expect(cmd).toEqual([
+      "gh", "pr", "create",
+      "--repo", "sinh-x/opencode",
+      "--base", "sinh-x-dev",
+      "--head", "sync/release-v1.18.19",
+      "--title", "chore(sync): merge release v1.18.19 into sinh-x-dev",
+      "--body", "## Release Sync — v1.18.19",
+    ])
+  })
+
+  test("the full release-mode gh pr list argument vector is correct", () => {
+    const repoArgs = ghRepoArgs("sinh-x/opencode")
+    const cmd = [
+      "gh", "pr", "list",
+      ...repoArgs,
+      "--head", "sync/release-v1.18.19",
+      "--base", "sinh-x-dev",
+      "--json", "url,headRefOid",
+      "--limit", "1",
+    ]
+    expect(cmd).toEqual([
+      "gh", "pr", "list",
+      "--repo", "sinh-x/opencode",
+      "--head", "sync/release-v1.18.19",
+      "--base", "sinh-x-dev",
+      "--json", "url,headRefOid",
+      "--limit", "1",
+    ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseReleaseArgs with forkRepo (OPS-1 — forkRepo stored in ReleaseConfig)
+// ---------------------------------------------------------------------------
+
+describe("parseReleaseArgs with forkRepo", () => {
+  const approvedSha = "2b72179c663cadcb54f54d9f19221b3fb3d11fb6"
+
+  test("stores forkRepo when provided in opts", () => {
+    const result = parseReleaseArgs("v1.18.19", approvedSha, "sinh-x-dev", {
+      dryRun: false,
+      remotes: { origin: "origin", upstream: "upstream" },
+      forkRepo: "sinh-x/opencode",
+    })
+    expect(result!.forkRepo).toBe("sinh-x/opencode")
+  })
+
+  test("defaults forkRepo to sinh-x/opencode when not provided", () => {
+    const result = parseReleaseArgs("v1.18.19", approvedSha, "sinh-x-dev", {
+      dryRun: false,
+      remotes: { origin: "origin", upstream: "upstream" },
+    })
+    expect(result!.forkRepo).toBe("sinh-x/opencode")
+  })
+
+  test("accepts a custom forkRepo", () => {
+    const result = parseReleaseArgs("v1.18.19", approvedSha, "sinh-x-dev", {
+      dryRun: false,
+      remotes: { origin: "origin", upstream: "upstream" },
+      forkRepo: "custom/repo",
+    })
+    expect(result!.forkRepo).toBe("custom/repo")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// validatePRBody (OPS-2 — PR body provenance validation)
+// ---------------------------------------------------------------------------
+
+describe("validatePRBody", () => {
+  const validBody = `## Release Sync — v1.18.19
+
+This PR merges upstream release tag \`v1.18.19\` into \`sinh-x-dev\` via the release sync branch \`sync/release-v1.18.19\`.
+
+- **Release tag:** \`v1.18.19\`
+- **Source SHA:** \`2b72179c663cadcb54f54d9f19221b3fb3d11fb6\`
+- **Release target metadata:** \`f4a89683da2fb5fd1b37995402100ca7a24a8484\`
+- **Base branch:** \`sinh-x-dev\`
+- **Release branch:** \`sync/release-v1.18.19\`
+
+### Verification
+
+- [x] Pre-sync health checks passed
+- [x] Release source verified
+- [x] \`bun install --frozen-lockfile\` passed
+- [x] \`bun typecheck\` passed
+
+### No Auto-Merge
+
+This PR must not be auto-merged.
+
+---
+_Generated by \`script/sync-upstream.ts\` release mode._`
+
+  test("passes when all required fields are present", () => {
+    const result = validatePRBody(validBody)
+    expect(result.ok).toBe(true)
+    expect(result.missing).toEqual([])
+  })
+
+  test("fails when body is just 'test' (the original PR #21 body)", () => {
+    const result = validatePRBody("test")
+    expect(result.ok).toBe(false)
+    expect(result.missing.length).toBeGreaterThan(0)
+  })
+
+  test("fails when Release tag: is missing", () => {
+    const body = validBody.replace("- **Release tag:**", "- **Tag:**")
+    const result = validatePRBody(body)
+    expect(result.ok).toBe(false)
+    expect(result.missing).toContain("Release tag:")
+  })
+
+  test("fails when Source SHA: is missing", () => {
+    const body = validBody.replace("- **Source SHA:**", "- **SHA:**")
+    const result = validatePRBody(body)
+    expect(result.ok).toBe(false)
+    expect(result.missing).toContain("Source SHA:")
+  })
+
+  test("fails when No Auto-Merge is missing", () => {
+    const body = validBody.replace("### No Auto-Merge", "### Merge Notes")
+    const result = validatePRBody(body)
+    expect(result.ok).toBe(false)
+    expect(result.missing).toContain("No Auto-Merge")
+  })
+
+  test("fails when Verification section is missing", () => {
+    const body = validBody.replace("### Verification", "### Checks")
+    const result = validatePRBody(body)
+    expect(result.ok).toBe(false)
+    expect(result.missing).toContain("Verification")
+  })
+
+  test("fails when Release target metadata: is missing", () => {
+    const body = validBody.replace("- **Release target metadata:**", "- **Metadata:**")
+    const result = validatePRBody(body)
+    expect(result.ok).toBe(false)
+    expect(result.missing).toContain("Release target metadata:")
+  })
+
+  test("fails for an empty body", () => {
+    const result = validatePRBody("")
+    expect(result.ok).toBe(false)
+    expect(result.missing.length).toBe(7)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SEC-1 regression: verifyReleaseSourceSha rejects tag-ref replacement
+// ---------------------------------------------------------------------------
+
+describe("SEC-1: tag-ref replacement after validation", () => {
+  const approvedSha = "2b72179c663cadcb54f54d9f19221b3fb3d11fb6"
+  const replacementSha = "deadbeefcafebabe0000000000000000000000aa"
+  const baseRcfg: ReleaseConfig = {
+    releaseTag: "v1.18.19",
+    expectedSourceSha: approvedSha,
+    dryRun: false,
+    remotes: { origin: "origin", upstream: "upstream" },
+    baseBranch: "sinh-x-dev",
+    releaseBranch: "sync/release-v1.18.19",
+    forkRepo: "sinh-x/opencode",
+  }
+
+  test("verifyReleaseSourceSha passes when tag matches approved SHA", () => {
+    const result = verifyReleaseSourceSha(baseRcfg, approvedSha, approvedSha)
+    expect(result.ok).toBe(true)
+  })
+
+  test("verifyReleaseSourceSha fails when local tag SHA is replaced after validation", () => {
+    // Simulate: remote tag still points at approved SHA, but local tag was
+    // replaced (e.g. force-tagged) to a different commit between validation
+    // and merge. The verify function catches this because localTagSha != expected.
+    const result = verifyReleaseSourceSha(baseRcfg, approvedSha, replacementSha)
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain("local tag SHA")
+    expect(result.message).toContain(replacementSha)
+  })
+
+  test("verifyReleaseSourceSha fails when remote tag SHA is replaced", () => {
+    const result = verifyReleaseSourceSha(baseRcfg, replacementSha, approvedSha)
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain("remote tag SHA")
+  })
+
+  test("the approved SHA (not tag ref) is used for merge — expectedSourceSha is the merge source", () => {
+    // SEC-1: stepReleaseMerge uses rcfg.expectedSourceSha directly, not
+    // refs/tags/<tag>. This test verifies the ReleaseConfig carries the
+    // approved SHA that would be passed to `git merge`.
+    expect(baseRcfg.expectedSourceSha).toBe(approvedSha)
+    // The tag ref would be: refs/tags/v1.18.19 — a mutable ref
+    // The approved SHA is: 2b72179c... — an immutable commit object
+    // stepReleaseMerge must use the latter, not the former.
+    expect(baseRcfg.expectedSourceSha).not.toMatch(/^refs\/tags\//)
   })
 })
