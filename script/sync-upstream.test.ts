@@ -34,7 +34,8 @@ import {
   validatePRBody,
   parseGitHubRepo,
   buildMergeCommands,
-  execReleaseMerge,
+  stepReleaseMerge,
+  stepReleasePushAndPR,
   validatePRMetadata,
   type WhichFn,
   type GhShell,
@@ -1096,6 +1097,22 @@ describe("parseGitHubRepo (OPS-1R)", () => {
   test("returns null for a local path", () => {
     expect(parseGitHubRepo("/home/sinh/git-repos/opencode")).toBe(null)
   })
+
+  test.each([
+    "https://evilgithub.com/sinh-x/opencode.git",
+    "https://notgithub.com/sinh-x/opencode.git",
+    "https://github.com.evil/sinh-x/opencode.git",
+    "https://user:pass@github.com/sinh-x/opencode.git",
+    "https://github.com:443/sinh-x/opencode.git",
+    "https://github.com/sinh-x/opencode.git/trick",
+    "ssh://git@github.com:22/sinh-x/opencode.git",
+  ])("rejects lookalike or malformed GitHub URL %s", (url) => {
+    expect(parseGitHubRepo(url)).toBe(null)
+  })
+
+  test("parses the supported ssh URL form", () => {
+    expect(parseGitHubRepo("ssh://git@github.com/sinh-x/opencode.git")).toBe("sinh-x/opencode")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1150,7 +1167,7 @@ describe("SEC-1R: buildMergeCommands — approved SHA is the merge target", () =
   })
 })
 
-describe("SEC-1R: execReleaseMerge — behavior-level command execution", () => {
+describe("SEC-1R: stepReleaseMerge — production command execution", () => {
   const approvedSha = "2b72179c663cadcb54f54d9f19221b3fb3d11fb6"
   const rcfg: ReleaseConfig = {
     releaseTag: "v1.18.19",
@@ -1170,7 +1187,7 @@ describe("SEC-1R: execReleaseMerge — behavior-level command execution", () => 
       if (cmd.join(" ").startsWith("git merge-base")) throw new Error("not ancestor")
       return ""
     }
-    await execReleaseMerge(rcfg, shell)
+    await stepReleaseMerge(rcfg, { shell })
     // Verify the merge command was called with the approved SHA
     const mergeCall = calls.find((c) => c.join(" ").startsWith("git merge "))
     expect(mergeCall).toBeDefined()
@@ -1184,7 +1201,7 @@ describe("SEC-1R: execReleaseMerge — behavior-level command execution", () => 
       calls.push(cmd)
       return "" // ancestry check succeeds
     }
-    const result = await execReleaseMerge(rcfg, shell)
+    const result = await stepReleaseMerge(rcfg, { shell })
     expect(result.status).toBe("completed")
     expect(result.message).toContain("skipped")
     // Only ancestry check ran, no merge command
@@ -1197,7 +1214,7 @@ describe("SEC-1R: execReleaseMerge — behavior-level command execution", () => 
       if (cmd.join(" ").startsWith("git merge-base")) throw new Error("not ancestor")
       throw new Error("merge conflict")
     }
-    const result = await execReleaseMerge(rcfg, shell)
+    const result = await stepReleaseMerge(rcfg, { shell, hasMergeConflicts: async () => false, abortMerge: async () => {} })
     expect(result.status).toBe("failed")
     expect(result.message).toContain(approvedSha)
   })
@@ -1212,7 +1229,7 @@ describe("SEC-1R: execReleaseMerge — behavior-level command execution", () => 
       if (cmd.join(" ").startsWith("git merge-base")) throw new Error("not ancestor")
       return ""
     }
-    await execReleaseMerge(rcfg, shell)
+    await stepReleaseMerge(rcfg, { shell })
     const mergeCall = calls.find((c) => c.join(" ") === `git merge ${approvedSha}`)
     expect(mergeCall).toBeDefined()
     // The tag ref would be `git merge refs/tags/v1.18.19` — that must NOT appear
@@ -1226,7 +1243,7 @@ describe("SEC-1R: execReleaseMerge — behavior-level command execution", () => 
 // not silently return null (which would allow duplicate PR creation)
 // ---------------------------------------------------------------------------
 
-describe("CQ-1R: findExistingPR fail-closed via execReleaseMerge shell pattern", () => {
+describe("CQ-1R: findExistingPR fail-closed contract", () => {
   // findExistingPR is not exported (it's internal), but we can test the
   // pattern via the PrListShell injection. The function throws on failure.
   // We verify the behavior contract here using the exported types.
@@ -1248,6 +1265,74 @@ describe("CQ-1R: findExistingPR fail-closed via execReleaseMerge shell pattern",
     const successShell = async (): Promise<string> => "[]"
     // This should NOT throw — it returns "[]" which parses to an empty array
     expect(successShell()).resolves.toBe("[]")
+  })
+})
+
+describe("CQ-2: production release push and PR orchestration", () => {
+  const rcfg: ReleaseConfig = {
+    releaseTag: "v1.18.19",
+    expectedSourceSha: "2b72179c663cadcb54f54d9f19221b3fb3d11fb6",
+    releaseTargetMetadata: "f4a89683da2fb5fd1b37995402100ca7a24a8484",
+    dryRun: false,
+    remotes: { origin: "origin", upstream: "upstream" },
+    baseBranch: "sinh-x-dev",
+    releaseBranch: "sync/release-v1.18.19",
+    forkRepo: "sinh-x/opencode",
+  }
+  const verification = [{ label: "gate passed", ok: true }]
+  const validBody = [
+    "- **Release tag:** `v1.18.19`",
+    "- **Source SHA:** `2b72179c663cadcb54f54d9f19221b3fb3d11fb6`",
+    "- **Release target metadata:** `f4a89683da2fb5fd1b37995402100ca7a24a8484`",
+    "- **Base branch:** `sinh-x-dev`",
+    "- **Release branch:** `sync/release-v1.18.19`",
+    "- [x] gate passed",
+    "This PR must not be auto-merged. It requires manual review and explicit merge approval after all gate evidence is verified.",
+  ].join("\n")
+
+  test("observes push, lookup, create, and read-back in production order", async () => {
+    const calls: string[][] = []
+    const result = await stepReleasePushAndPR(rcfg, verification, {
+      gitShell: async (cmd) => {
+        calls.push(cmd)
+        return cmd[1] === "rev-parse" ? rcfg.expectedSourceSha : ""
+      },
+      prListShell: async (cmd) => {
+        calls.push(cmd)
+        return "[]"
+      },
+      prCreateShell: async (cmd) => {
+        calls.push(cmd)
+        return "https://github.com/sinh-x/opencode/pull/21\n"
+      },
+      prViewShell: async (cmd) => {
+        calls.push(cmd)
+        return JSON.stringify({ number: 21, url: "https://github.com/sinh-x/opencode/pull/21", baseRefName: rcfg.baseBranch, headRefName: rcfg.releaseBranch, headRefOid: rcfg.expectedSourceSha, body: validBody })
+      },
+      buildBody: async () => validBody,
+    })
+    expect(result.status).toBe("completed")
+    expect(calls.map((cmd) => cmd.slice(0, 3))).toEqual([
+      ["git", "push", "-u"],
+      ["git", "rev-parse", "HEAD"],
+      ["gh", "pr", "list"],
+      ["gh", "pr", "create"],
+      ["gh", "pr", "view"],
+    ])
+    expect(calls[2]).toContain("--repo")
+    expect(calls[2]).toContain("sinh-x/opencode")
+  })
+
+  test("lookup failure prevents PR creation", async () => {
+    let created = false
+    const result = await stepReleasePushAndPR(rcfg, verification, {
+      gitShell: async (cmd) => cmd[1] === "rev-parse" ? rcfg.expectedSourceSha : "",
+      prListShell: async () => { throw new Error("gh lookup failed") },
+      prCreateShell: async () => { created = true; return "" },
+      buildBody: async () => validBody,
+    })
+    expect(result.status).toBe("failed")
+    expect(created).toBe(false)
   })
 })
 
@@ -1293,7 +1378,7 @@ describe("OPS-2R: validatePRMetadata — exact value validation", () => {
       "",
       "### No Auto-Merge",
       "",
-      "This PR must not be auto-merged.",
+      "This PR must not be auto-merged. It requires manual review and explicit merge approval after all gate evidence is verified.",
     ].join("\n")
   }
 
@@ -1365,10 +1450,10 @@ describe("OPS-2R: validatePRMetadata — exact value validation", () => {
   })
 
   test("fails when No Auto-Merge statement is missing despite labels present", () => {
-    const wrongBody = makeValidBody().replace("### No Auto-Merge\n\nThis PR must not be auto-merged.", "### Merge Notes")
+    const wrongBody = makeValidBody().replace("### No Auto-Merge\n\nThis PR must not be auto-merged. It requires manual review and explicit merge approval after all gate evidence is verified.", "### Merge Notes")
     const meta = { ...validMeta, body: wrongBody }
     const errors = validatePRMetadata(meta, rcfg, localHead, verification)
-    expect(errors.some((e) => e.includes("No Auto-Merge"))).toBe(true)
+    expect(errors.some((e) => e.includes("complete no-auto-merge"))).toBe(true)
   })
 
   test("fails when a verification gate outcome is missing from the body", () => {
@@ -1392,6 +1477,34 @@ describe("OPS-2R: validatePRMetadata — exact value validation", () => {
     // But exact-value check must fail:
     const errors = validatePRMetadata(meta, rcfg, localHead, verification)
     expect(errors.some((e) => e.includes("exact source SHA"))).toBe(true)
+  })
+
+  test("rejects correct values placed under the wrong provenance fields", () => {
+    const wrongFields = makeValidBody()
+      .replace("- **Release tag:** `v1.18.19`", "- **Source SHA:** `v1.18.19`")
+      .replace("- **Source SHA:** `2b72179c663cadcb54f54d9f19221b3fb3d11fb6`", "- **Release tag:** `2b72179c663cadcb54f54d9f19221b3fb3d11fb6`")
+    const errors = validatePRMetadata({ ...validMeta, body: wrongFields }, rcfg, localHead, verification)
+    expect(errors.some((e) => e.includes("exact source SHA provenance line"))).toBe(true)
+  })
+
+  test("rejects wrong branch values in body provenance lines", () => {
+    const body = makeValidBody().replace("- **Base branch:** `sinh-x-dev`", "- **Base branch:** `dev`")
+    const errors = validatePRMetadata({ ...validMeta, body }, rcfg, localHead, verification)
+    expect(errors.some((e) => e.includes("Base branch"))).toBe(true)
+  })
+
+  test("rejects the opposite checkbox state for both passing and failing gates", () => {
+    const body = makeValidBody()
+      .replace("- [x] Pre-sync health checks passed", "- [ ] Pre-sync health checks passed")
+      .replace("- [x] `bun typecheck` passed", "- [ ] `bun typecheck` passed")
+    const errors = validatePRMetadata({ ...validMeta, body }, rcfg, localHead, verification)
+    expect(errors.filter((e) => e.includes("verification gate outcome")).length).toBe(2)
+  })
+
+  test("rejects incomplete no-auto-merge text", () => {
+    const body = makeValidBody().replace(" It requires manual review and explicit merge approval after all gate evidence is verified.", "")
+    const errors = validatePRMetadata({ ...validMeta, body }, rcfg, localHead, verification)
+    expect(errors.some((e) => e.includes("complete no-auto-merge"))).toBe(true)
   })
 })
 

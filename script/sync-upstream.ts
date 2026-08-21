@@ -1054,41 +1054,14 @@ export function buildMergeCommands(rcfg: ReleaseConfig): {
  * vectors and prove the merge target is `expectedSourceSha`, not the tag ref.
  * This is the behavior-level evidence required by SEC-1R.
  */
-export async function execReleaseMerge(
-  rcfg: ReleaseConfig,
-  shell: GitShell,
-): Promise<StepResult> {
-  const approvedSha = rcfg.expectedSourceSha
-  const cmds = buildMergeCommands(rcfg)
-  // FR6: skip if the approved commit is already an ancestor of HEAD.
-  try {
-    await shell(cmds.ancestry)
-    return {
-      step: "release-merge",
-      status: "completed",
-      message: `skipped: ${rcfg.releaseTag} (SHA ${approvedSha}) already an ancestor of HEAD`,
-    }
-  } catch {
-    // Not an ancestor — proceed with the merge.
-  }
-  try {
-    const mergeOut = await shell(cmds.merge)
-    return {
-      step: "release-merge",
-      status: "completed",
-      message: `release tag ${rcfg.releaseTag} (SHA ${approvedSha}) merged cleanly into ${rcfg.releaseBranch}`,
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return {
-      step: "release-merge",
-      status: "failed",
-      message: `git merge ${approvedSha} for ${rcfg.releaseTag} failed: ${msg}`,
-    }
-  }
+export interface ReleaseMergeDependencies {
+  shell?: GitShell
+  hasMergeConflicts?: () => Promise<boolean>
+  conflictingFiles?: () => Promise<string[]>
+  abortMerge?: () => Promise<void>
 }
 
-async function stepReleaseMerge(rcfg: ReleaseConfig): Promise<StepResult> {
+export async function stepReleaseMerge(rcfg: ReleaseConfig, dependencies: ReleaseMergeDependencies = {}): Promise<StepResult> {
   using _ = group("FR3 — merge verified release tag into release branch")
   // SEC-1: use the approved immutable SHA directly for ancestry and merge
   // operations. The tag ref is mutable (can be replaced after validation), so
@@ -1097,9 +1070,14 @@ async function stepReleaseMerge(rcfg: ReleaseConfig): Promise<StepResult> {
   // verifyReleaseSourceSha) and use `expectedSourceSha` here. The tag is
   // retained only as provenance in the log line below.
   const approvedSha = rcfg.expectedSourceSha
+  const cmds = buildMergeCommands(rcfg)
+  const shell = dependencies.shell ?? defaultGitShell
+  const detectConflicts = dependencies.hasMergeConflicts ?? hasMergeConflicts
+  const listConflicts = dependencies.conflictingFiles ?? conflictingFiles
+  const abort = dependencies.abortMerge ?? abortMerge
   // FR6: skip if the approved commit is already an ancestor of HEAD.
   try {
-    await $`git merge-base --is-ancestor ${approvedSha} HEAD`.quiet()
+    await shell(cmds.ancestry)
     okLine(`${rcfg.releaseTag} (${approvedSha}) already merged into ${rcfg.releaseBranch} — skipping (resume)`)
     return {
       step: "release-merge",
@@ -1112,10 +1090,10 @@ async function stepReleaseMerge(rcfg: ReleaseConfig): Promise<StepResult> {
   try {
     okLine(`merging ${rcfg.releaseTag} (SHA ${approvedSha}) into ${rcfg.releaseBranch}…`)
     try {
-      await $`git merge ${approvedSha}`
+      await shell(cmds.merge)
     } catch (err) {
-      if (await hasMergeConflicts()) {
-        const files = await conflictingFiles()
+      if (await detectConflicts()) {
+        const files = await listConflicts()
         return {
           step: "release-merge",
           status: "conflict",
@@ -1124,7 +1102,7 @@ async function stepReleaseMerge(rcfg: ReleaseConfig): Promise<StepResult> {
         }
       }
       const msg = err instanceof Error ? err.message : String(err)
-      await abortMerge()
+      await abort()
       return {
         step: "release-merge",
         status: "failed",
@@ -1216,6 +1194,21 @@ const defaultPrListShell: PrListShell = async (cmd) => {
   return await $`${[bin, ...args] as string[]}`.quiet().text()
 }
 
+export type PrCreateShell = (cmd: string[]) => Promise<string>
+
+const defaultPrCreateShell: PrCreateShell = async (cmd) => {
+  const [bin, ...args] = cmd
+  return await $`${[bin, ...args] as string[]}`.text()
+}
+
+export interface ReleasePushAndPRDependencies {
+  gitShell?: GitShell
+  prListShell?: PrListShell
+  prViewShell?: PrViewShell
+  prCreateShell?: PrCreateShell
+  buildBody?: (rcfg: ReleaseConfig, verification: VerificationItem[]) => Promise<string>
+}
+
 async function findExistingPR(rcfg: ReleaseConfig, shell: PrListShell = defaultPrListShell): Promise<ExistingPR | null> {
   const repoArgs = ghRepoArgs(rcfg.forkRepo)
   // CQ-1R: do not catch — let exceptions propagate so the caller fails closed.
@@ -1251,28 +1244,34 @@ async function findExistingPR(rcfg: ReleaseConfig, shell: PrListShell = defaultP
  * generic field labels is insufficient — we read back and validate the exact
  * PR metadata values.
  */
-async function stepReleasePushAndPR(
+export async function stepReleasePushAndPR(
   rcfg: ReleaseConfig,
   verification: VerificationItem[],
+  dependencies: ReleasePushAndPRDependencies = {},
 ): Promise<StepResult> {
   using _ = group("FR7 — push release branch + create or surface PR")
   const repoArgs = ghRepoArgs(rcfg.forkRepo)
+  const gitShell = dependencies.gitShell ?? defaultGitShell
+  const prListShell = dependencies.prListShell ?? defaultPrListShell
+  const prViewShell = dependencies.prViewShell ?? defaultPrViewShell
+  const prCreateShell = dependencies.prCreateShell ?? defaultPrCreateShell
+  const buildBody = dependencies.buildBody ?? buildReleasePRBody
   try {
     // CQ-1: push the validated release branch BEFORE PR lookup so a resumed
     // run with a newer local commit does not leave the PR on a stale remote.
     // The push is idempotent when local and remote are already in sync.
     okLine(`pushing ${rcfg.releaseBranch} to ${rcfg.remotes.origin}…`)
-    await $`git push -u ${rcfg.remotes.origin} ${rcfg.releaseBranch}`
+    await gitShell(["git", "push", "-u", rcfg.remotes.origin, rcfg.releaseBranch])
     okLine(`pushed ${rcfg.releaseBranch}`)
 
-    const localHead = (await $`git rev-parse HEAD`.text()).trim()
+    const localHead = (await gitShell(["git", "rev-parse", "HEAD"])).trim()
 
     // FR6: check for an existing PR (after push so its head matches local).
     // CQ-1R: findExistingPR throws on gh pr list failure — no silent "no PR".
-    const existingPR = await findExistingPR(rcfg)
+    const existingPR = await findExistingPR(rcfg, prListShell)
     if (existingPR) {
       // OPS-2R: validate exact PR metadata — not just labels but exact values.
-      const prMeta = await readBackPRFull(rcfg, existingPR.url)
+      const prMeta = await readBackPRFull(rcfg, existingPR.url, prViewShell)
       const metaErrors = validatePRMetadata(prMeta, rcfg, localHead, verification)
       if (metaErrors.length > 0) {
         return {
@@ -1290,16 +1289,19 @@ async function stepReleasePushAndPR(
     }
 
     const title = `chore(sync): merge release ${rcfg.releaseTag} into ${rcfg.baseBranch}`
-    const body = await buildReleasePRBody(rcfg, verification)
+    const body = await buildBody(rcfg, verification)
 
     okLine("creating PR via `gh pr create`…")
-    const prOut = await $`gh pr create ${repoArgs as string[]} --base ${rcfg.baseBranch} --head ${rcfg.releaseBranch} --title ${title} --body ${body}`.text()
+    const prOut = await prCreateShell([
+      "gh", "pr", "create", ...repoArgs, "--base", rcfg.baseBranch,
+      "--head", rcfg.releaseBranch, "--title", title, "--body", body,
+    ])
     const prUrl = prOut.trim()
     okLine(`PR created: ${prUrl}`)
 
     // OPS-2R: read back the created PR and validate exact metadata values,
     // not just generic field labels. Fail on any mismatch.
-    const prMeta = await readBackPRFull(rcfg, prUrl)
+    const prMeta = await readBackPRFull(rcfg, prUrl, prViewShell)
     const metaErrors = validatePRMetadata(prMeta, rcfg, localHead, verification)
     if (metaErrors.length > 0) {
       return {
@@ -1470,29 +1472,34 @@ export function validatePRMetadata(
   if (meta.headRefOid !== localHead) {
     errors.push(`headRefOid "${meta.headRefOid}" !== local HEAD "${localHead}"`)
   }
-  // Body label validation
-  const bodyResult = validatePRBody(meta.body ?? "")
-  if (!bodyResult.ok) {
-    errors.push(`body missing required labels: ${bodyResult.missing.join(", ")}`)
-  }
-  // Exact value validation — not just labels
   const body = meta.body ?? ""
-  if (!body.includes(`\`${rcfg.releaseTag}\``)) {
-    errors.push(`body does not contain exact release tag "${rcfg.releaseTag}"`)
+  const expectedFields = [
+    ["Release tag", `\`${rcfg.releaseTag}\``],
+    ["Source SHA", `\`${rcfg.expectedSourceSha}\``],
+    ...(rcfg.releaseTargetMetadata ? [["Release target metadata", `\`${rcfg.releaseTargetMetadata}\``]] : []),
+    ["Base branch", `\`${rcfg.baseBranch}\``],
+    ["Release branch", `\`${rcfg.releaseBranch}\``],
+  ] as const
+  for (const [label, value] of expectedFields) {
+    const expectedLine = `- **${label}:** ${value}`
+    if (!body.split(/\r?\n/).includes(expectedLine)) {
+      const names: Record<string, string> = {
+        "Release tag": "exact release tag",
+        "Source SHA": "exact source SHA",
+        "Release target metadata": "exact release target metadata",
+        "Base branch": "exact base branch",
+        "Release branch": "exact release branch",
+      }
+      errors.push(`body does not contain ${names[label]} provenance line "${expectedLine}"`)
+    }
   }
-  if (!body.includes(`\`${rcfg.expectedSourceSha}\``)) {
-    errors.push(`body does not contain exact source SHA "${rcfg.expectedSourceSha}"`)
+  const noAutoMerge = "This PR must not be auto-merged. It requires manual review and explicit merge approval after all gate evidence is verified."
+  if (!body.split(/\r?\n/).includes(noAutoMerge)) {
+    errors.push(`body does not contain the complete no-auto-merge statement`)
   }
-  if (rcfg.releaseTargetMetadata && !body.includes(`\`${rcfg.releaseTargetMetadata}\``)) {
-    errors.push(`body does not contain exact release target metadata "${rcfg.releaseTargetMetadata}"`)
-  }
-  if (!body.includes("No Auto-Merge")) {
-    errors.push(`body does not contain "No Auto-Merge" statement`)
-  }
-  // Gate outcomes: each verification item must appear as a checked box in the body
   for (const item of verification) {
     const box = item.ok ? "[x]" : "[ ]"
-    if (!body.includes(`${box} ${item.label}`) && !body.includes(item.label)) {
+    if (!body.split(/\r?\n/).includes(`- ${box} ${item.label}`)) {
       errors.push(`body does not contain verification gate outcome: ${item.label}`)
     }
   }
@@ -1824,13 +1831,21 @@ export async function resolveForkRepo(): Promise<string> {
 
 /** Parse a GitHub remote URL (SSH or HTTPS) into `owner/name`. Returns null when not a GitHub URL. */
 export function parseGitHubRepo(url: string): string | null {
-  // SSH: git@github.com:owner/name.git or github.com:owner/name
-  const sshMatch = url.match(/github\.com[:/]([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?$/)
-  if (sshMatch && sshMatch[1]) return sshMatch[1]
-  // HTTPS: https://github.com/owner/name.git
-  const httpsMatch = url.match(/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?$/)
-  if (httpsMatch && httpsMatch[1]) return httpsMatch[1]
-  return null
+  const repoPath = /^\/?([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?$/
+  const scpMatch = url.match(/^git@github\.com:(.+)$/)
+  if (scpMatch) return scpMatch[1]?.match(repoPath)?.[1] ?? null
+  if (/^https:\/\/github\.com:\d+(?:\/|$)/.test(url) || /^ssh:\/\/git@github\.com:\d+(?:\/|$)/.test(url)) return null
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== "https:" && parsed.protocol !== "ssh:") return null
+    if (parsed.hostname !== "github.com" || parsed.port !== "" || parsed.password !== "") return null
+    if (parsed.protocol === "https:" && parsed.username !== "") return null
+    if (parsed.protocol === "ssh:" && parsed.username !== "git") return null
+    if (parsed.search || parsed.hash) return null
+    return parsed.pathname.match(repoPath)?.[1] ?? null
+  } catch {
+    return null
+  }
 }
 
 async function parseCli(): Promise<SyncConfig | ReleaseConfig> {
